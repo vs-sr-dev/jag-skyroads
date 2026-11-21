@@ -74,20 +74,28 @@ HAL_CELLS = [
     ('TICK_DIV', 4),             # set at boot: VI rate in 1e-4 Hz
     ('GAME_TICKS', 4),           # ISR only
     ('GAME_DONE', 4),            # main loop only
-    # Written by the C blob after every tick, read by RMAC (SetShip).
-    ('SHIP_FRAME', 2),           # CARS frame, -1 = none
-    ('SHIP_LEFT', 2),            # screen x of the sprite
-    ('SHIP_TOP', 2),             # screen y of the sprite
     # The attract demo checked against the PC oracle (C writes, RMAC reads).
     ('DEMO_TICK', 4),            # ticks into the current run
     ('DEMO_BAD', 4),             # first mismatching tick + 1, 0 = all match
     ('DEMO_RUNS', 4),            # completed runs that matched to the end
+    # The GPU road launch (csrc/game_main.c writes GPU_CMD, the GPU GPU_DONE;
+    # the 68000 clears DONE only before a launch, when the GPU is stopped).
+    ('GPU_CMD', 4),
+    ('GPU_DONE', 4),
+    # Rendered frames.  ROAD_SEQ: C only (frames finished; frame k is drawn
+    # into VIEW(k&1)).  ROAD_SHOWN: RMAC only (the frame on screen).
+    ('ROAD_SEQ', 4),
+    ('ROAD_SHOWN', 4),
+    ('GPU_FAIL', 4),             # C only: launches whose DONE never came
 ]
 
 # --- OP objects, in LIST ORDER = priority (whoever is drawn last wins) -------
 OBJECTS = [
-    'BACKDROP',                  # the world picture, opaque, rows 0..137
-    'SHIP',                      # the ship sprite, 32x24, transparent
+    # The viewport, rows 0..137, opaque: ONE frame buffer the GPU and the
+    # 68000 compose (backdrop, road, ship, shadow).  Stacking road layers and
+    # the ship as objects put three full-width objects on a line, and that
+    # stopped the real Jaguar dead (M2, hardware).
+    'VIEW',
     # The dashboard is TWO objects over the same pixels.  In the original its
     # index-0 pixels are transparent only where they overlap the viewport
     # (rows 129..137); below, the pristine screen holds 0 there and they show
@@ -118,6 +126,13 @@ def dram_regions():
         ('BACKDROP_BUF', WORLD_BYTES, 64),
         ('DASH_BUF', DASH_BYTES, 64),
         ('CARS_BUF', CAR_BYTES * CAR_FRAMES, 64),
+        # The road's span blocks, which the GPU reads: DRAM, not cartridge.
+        ('TREKG_BUF', cart_blob_size('trekg.bin'), 64),
+        # The viewport frame buffers (csrc/road.h VIEW_BYTES, checked there).
+        ('VIEW0', WORLD_BYTES, 64),
+        ('VIEW1', WORLD_BYTES, 64),
+        # The GPU command list: csrc/road.h ROAD_CMD_MAX longs, checked there.
+        ('CMD_BUF', 0x2400, 8),
     ]
 
 
@@ -128,10 +143,18 @@ CART_BLOBS = [
     ('ROM_DASH', 'dash.bin'),
     ('ROM_CARS', 'cars.bin'),
     ('ROM_ROADS', 'roads.bin'),
-    ('ROM_TREK', 'trek.bin'),
+    ('ROM_TREKG', 'trekg.bin'),
+    ('ROM_TABLES', 'tables.bin'),
     ('ROM_DEMO', 'demo.bin'),
     ('ROM_DEMOX', 'demo_expect.bin'),   # tools/oracle/demo_oracle.c
 ]
+
+
+def cart_blob_size(fn):
+    path = os.path.join(CART_DIR, fn)
+    if not os.path.isfile(path):
+        raise SystemExit(f"cart/{fn} missing: run tools/sr2jag.py first")
+    return align(os.path.getsize(path), 32)
 
 
 def align(v, a):
@@ -222,7 +245,8 @@ def main():
     eq += [(k, v, 'switch') for k, v in SWITCHES.items()]
     eq += [('C_MAGIC', C_MAGIC, "c_init's answer"),
            ('C_ENTRY_INIT', regs['DBLOB'][0], 'C entry table: jmp c_init'),
-           ('C_ENTRY_TICK', regs['DBLOB'][0] + 6, 'C entry table: jmp c_tick')]
+           ('C_ENTRY_TICK', regs['DBLOB'][0] + 6, 'C entry table: jmp c_tick'),
+           ('C_ENTRY_RENDER', regs['DBLOB'][0] + 12, 'C entry table: jmp c_render')]
     eq += [('SCR_W', SCR_W, None), ('SCR_H', SCR_H, None), ('GAME_H', GAME_H, None),
            ('GAME_Y', GAME_Y, None), ('VIEW_H', VIEW_H, None), ('DASH_Y', DASH_Y, None),
            ('DASH_H', DASH_H, None), ('DASH_TOP_H', VIEW_H - DASH_Y, None), ('WORLD_BYTES', WORLD_BYTES, None),

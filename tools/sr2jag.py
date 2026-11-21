@@ -26,8 +26,9 @@ Blobs:
   cars.bin       77 ship/explosion frames, 32x24 row-major (the strip is
                  stored column-major, 24 rows x 30 columns per cell), +72.
   roads.bin      index of 31 x 16 bytes, then per road rows*7 u16 tile codes.
-  trek.bin       index of 8 x 8 bytes, then the 8 expanded span objects
-                 (little-endian inside, as the original has them).
+  trekg.bin      the 8 road-phase span objects re-laid for the GPU (see
+                 trek_gpu below).
+  tables.bin     the renderer's tables from SKYROADS.EXE's data segment.
   demo.bin       u32 length, then DEMO.REC verbatim.
 """
 import os
@@ -80,6 +81,105 @@ def png(name, w, h, pixels, clut):
     img = Image.new('RGB', (w, h))
     img.putdata([rgb16_to_rgb8(clut[p]) for p in pixels])
     img.save(os.path.join(PREVIEW, name))
+
+
+# --- the road's span tables, re-laid for the GPU ------------------------------
+#
+# The original's records (renderer.md sec.4.3) are byte streams: colour,
+# anchor (always x=160, one scanline per entry), then (offset, length, pad)
+# per scanline.  The GPU reads external memory safely only as aligned LONGS,
+# so every record becomes:
+#     u32 row       first scanline's offset in a road layer (y_rel * 320)
+#     u32 n         scanlines
+#     n x u32       (x0 << 16) | length   for the LEFT half; the right half
+#                   is its mirror around x=160: x = 320 - x0 - length
+# The record CHAINS of the original (a composer draws "the next record" by
+# calling the fill again) become consecutive indices, and the directory holds
+# record indices instead of byte offsets.  The 68000 needs the colour too.
+#
+# trekg.bin:  8 x u32 object offsets, then per object
+#     +0  u32 records   +4 u32 colours offset   +8 u32 span-block offsets offset
+#     +12 u16 dir[13 rows][4 columns][6 kinds]  (record indices)
+#     colours: u8 per record;  offsets: u32 per record, relative to the BLOB
+#     start;  then the span blocks.
+# All offsets are relative to the blob start so the 68000 adds one base.
+LAYER_ROWS = 106          # viewport rows 32..137, the only ones roads reach
+DIR_ENTRIES = 13 * 4 * 6
+
+
+def parse_records(o):
+    """{byte offset: (colour, y_rel, [(x0, len)...])}, in file order."""
+    recs = {}
+    si = 0x270
+    for _ in range(0x410):
+        start = si
+        colour = o[si]
+        anchor = o[si + 1] | (o[si + 2] << 8)
+        si += 3
+        if (anchor - 160) % 320:
+            raise SystemExit(f"TREKDAT record @{start:#x}: anchor {anchor} not on x=160")
+        y_rel = (anchor - 160) // 320
+        spans = []
+        while o[si] != 0xFF:
+            off, ln = o[si], o[si + 1]
+            si += 3
+            x0 = 160 - off
+            if x0 < 0 or x0 + ln > 320:
+                raise SystemExit(f"TREKDAT record @{start:#x}: span off {off} len {ln} leaves the screen")
+            spans.append((x0, ln))
+        si += 1
+        if spans and (y_rel < 0 or y_rel + len(spans) > LAYER_ROWS):
+            raise SystemExit(f"TREKDAT record @{start:#x}: rows {y_rel}..{y_rel + len(spans)} outside the layer")
+        recs[start] = (colour, y_rel, spans)
+    return recs
+
+
+def trek_gpu(objs):
+    blob = bytearray(4 * len(objs))
+    for k, o in enumerate(objs):
+        recs = parse_records(o)
+        order = list(recs)                                  # file order = chain order
+        index = {ofs: i for i, ofs in enumerate(order)}
+        dir_ofs = struct.unpack_from(f'<{DIR_ENTRIES}H', o, 0)
+        dir_idx = []
+        for d in dir_ofs:
+            if d not in index:
+                raise SystemExit(f"TREKDAT object {k}: directory entry {d:#x} is not a record")
+            dir_idx.append(index[d])
+        base = len(blob)
+        struct.pack_into('>I', blob, 4 * k, base)
+        n = len(order)
+        hdr = 12 + 2 * DIR_ENTRIES
+        col_ofs = hdr
+        off_ofs = col_ofs + n + (-(col_ofs + n) % 4)
+        spans_at = off_ofs + 4 * n
+        obj = bytearray(spans_at)
+        struct.pack_into('>III', obj, 0, n, col_ofs, off_ofs)
+        struct.pack_into(f'>{DIR_ENTRIES}H', obj, 12, *dir_idx)
+        body = bytearray()
+        for i, ofs in enumerate(order):
+            colour, y_rel, spans = recs[ofs]
+            obj[col_ofs + i] = colour
+            struct.pack_into('>I', obj, off_ofs + 4 * i, base + spans_at + len(body))
+            body += struct.pack('>II', max(y_rel, 0) * 320, len(spans))
+            for x0, ln in spans:
+                body += struct.pack('>I', (x0 << 16) | ln)
+        blob += obj + body
+        blob += bytes(-len(blob) % 8)
+    return bytes(blob)
+
+
+# tables.bin: the EXE's data-segment tables the renderer needs (offsets are
+# fixed in csrc/shared.h: TAB_QUAD, TAB_SHADOW, TAB_COWL).
+def tables_blob(t):
+    b = bytearray(t['quad'])                         # 296 bytes at 0
+    b += bytes(-len(b) % 8)
+    b += t['shadow']                                 # 1305 bytes at 296
+    b += bytes(-len(b) % 8)
+    b += struct.pack('>138H', *t['cowl'])            # at 1608
+    b += bytes(-len(b) % 8)
+    assert len(t['quad']) == 296 and len(t['shadow']) == 1305
+    return bytes(b)
 
 
 def find_source(argv):
@@ -180,6 +280,9 @@ def main(argv):
         index += struct.pack('>II', 64 + len(body), len(o))
         body += pad8(o)
     write('trek.bin', bytes(index + body))
+
+    write('trekg.bin', trek_gpu(objs))
+    write('tables.bin', tables_blob(sd.exe_tables(src)))
 
     demo = src.read('DEMO.REC')
     write('demo.bin', pad8(struct.pack('>I', len(demo)) + demo))

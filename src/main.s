@@ -118,6 +118,9 @@ COL_OK_A        EQU     $003F
 COL_OK_B        EQU     $0018
 COL_BAD_A       EQU     $F800
 COL_BAD_B       EQU     $6000
+;   COL_GPU_A  $FFC0  magenta    COL_GPU_B  $7BC0  dark magenta
+COL_GPU_A       EQU     $FFC0
+COL_GPU_B       EQU     $7BC0
 
 ;---------------------------------------------------------------------------
 ; Game time: 36.0036 Hz (PIT divisor 6628, 2 phases of 10: FORMATS.md sec.9)
@@ -135,9 +138,6 @@ MAX_CATCHUP     EQU     4
 ; The attract demo runs on road 0 (game.c: world 0 for the demo).
 DEMO_ROAD       EQU     0
 
-; The ship sprite: 32x24 at 8 bpp = 4 phrases a row.
-SHIP_IW         EQU     4
-SHIP_H          EQU     (CAR_BYTES/32)
 
 ; Boot stages for BOOT_MARK.
 BM_START        EQU     1
@@ -230,6 +230,8 @@ Start:
     bsr     LoadWorld
     bsr     LoadDash
     bsr     LoadCars
+    bsr     LoadTrek
+    bsr     InitGpu
     move.l  #BM_ASSETS, BOOT_MARK
 
 ;---------------------------------------------------------------------------
@@ -281,7 +283,10 @@ MainLoop:
     move.w  #COL_BLACK, BG
     .endif
 
-    bsr     SetShip
+; The frame C finished last goes on screen here, right after the interrupt,
+; the furthest point from the next one: the handler never copies a
+; half-written object.
+    bsr     SetView
 
     move.l  GAME_TICKS, d6
     move.l  d6, d0
@@ -292,11 +297,48 @@ MainLoop:
     subq.l  #MAX_CATCHUP, d0
     move.l  d0, GAME_DONE
 .ml_tick:
+    moveq   #0, d7                          ; ticks run this frame
+.ml_more:
     cmp.l   GAME_DONE, d6
-    beq.s   MainLoop
+    beq.s   .ml_render
     jsr     C_ENTRY_TICK
     addq.l  #1, GAME_DONE
-    bra.s   .ml_tick
+    addq.l  #1, d7
+    bra.s   .ml_more
+; One road frame after the ticks, if there were any: the original renders
+; once per game tick, and a video frame without a tick shows the last one.
+.ml_render:
+    tst.l   d7
+    beq     MainLoop
+    jsr     C_ENTRY_RENDER
+    bra     MainLoop
+
+;---------------------------------------------------------------------------
+; SetView: the viewport object on the frame buffer of frame ROAD_SEQ
+; (written by C when its frame is complete: backdrop, road, ship, shadow).
+; ROAD_SHOWN is this routine's own copy: one writer per cell.
+;---------------------------------------------------------------------------
+SetView:
+    movem.l d0-d7/a0, -(sp)
+    move.l  ROAD_SEQ, d6
+    move.l  d6, ROAD_SHOWN
+    lea     OBJ_SHADOW+(OBJ_VIEW*OBJ_STRIDE), a0
+    move.l  #VIEW0, d0
+    btst    #0, d6
+    beq.s   .sv_buf
+    move.l  #VIEW1, d0
+.sv_buf:
+    moveq   #0, d1
+    move.w  VDB_VAL, d1
+    add.l   #(GAME_Y*2), d1
+    move.l  #VIEW_H, d2
+    moveq   #0, d3
+    move.l  #GAME_IWIDTH, d4
+    move.l  #GAME_IWIDTH, d5
+    moveq   #0, d7
+    bsr     MakeObj
+    movem.l (sp)+, d0-d7/a0
+    rts
 
 ;---------------------------------------------------------------------------
 ; BgProbe: the margins beat every 32 frames, in colours that say how the
@@ -305,6 +347,7 @@ MainLoop:
 ;   green / dark green     at least one whole run matched, tick for tick
 ;   red / dark red         a tick differed (DEMO_BAD = which, +1)
 ;---------------------------------------------------------------------------
+;   magenta / dark magenta the GPU missed a DONE (GPU_FAIL), above all else
 BgProbe:
     move.w  #COL_BEAT_A, d0
     move.w  #COL_BEAT_B, d1
@@ -314,66 +357,20 @@ BgProbe:
     move.w  #COL_OK_B, d1
 .bp_bad:
     tst.l   DEMO_BAD
-    beq.s   .bp_pick
+    beq.s   .bp_gpu
     move.w  #COL_BAD_A, d0
     move.w  #COL_BAD_B, d1
+.bp_gpu:
+    tst.l   GPU_FAIL
+    beq.s   .bp_pick
+    move.w  #COL_GPU_A, d0
+    move.w  #COL_GPU_B, d1
 .bp_pick:
     btst    #5, d5
     beq.s   .bp_set
     move.w  d1, d0
 .bp_set:
     move.w  d0, BG
-    rts
-
-;---------------------------------------------------------------------------
-; SetShip: the ship's OP object from SHIP_FRAME/LEFT/TOP (written by C).
-; The OP does not clip at the top (ob.v: it compares VC >= YPOS, an object
-; starting above the window slides down instead of entering), so rows above
-; the game screen are skipped by advancing DATA and shortening HEIGHT.
-; Frame -1 (explosion over) = HEIGHT 0, which switches the object off.
-;---------------------------------------------------------------------------
-SetShip:
-    movem.l d0-d7/a0, -(sp)
-    lea     OBJ_SHADOW+(OBJ_SHIP*OBJ_STRIDE), a0
-    move.w  SHIP_FRAME, d0
-    bmi.s   .ss_off
-    mulu    #CAR_BYTES, d0
-    add.l   #CARS_BUF, d0
-    move.l  #SHIP_H, d2
-    move.w  SHIP_TOP, d6
-    ext.l   d6
-    bpl.s   .ss_y
-    neg.l   d6
-    cmp.l   d2, d6
-    bge.s   .ss_off
-    sub.l   d6, d2
-    lsl.l   #5, d6                          ; * 32 bytes per sprite row
-    add.l   d6, d0
-    moveq   #0, d6
-.ss_y:
-    moveq   #0, d1
-    move.w  VDB_VAL, d1
-    add.l   #(GAME_Y*2), d1
-    add.l   d6, d1
-    add.l   d6, d1                          ; YPOS counts half-lines
-    move.w  SHIP_LEFT, d3
-    ext.l   d3
-    moveq   #SHIP_IW, d4
-    moveq   #SHIP_IW, d5
-    move.l  #OBJ_TRANS, d7
-    bsr     MakeObj
-    bra.s   .ss_done
-.ss_off:
-    move.l  #CARS_BUF, d0
-    moveq   #0, d1
-    moveq   #0, d2
-    moveq   #0, d3
-    moveq   #SHIP_IW, d4
-    moveq   #SHIP_IW, d5
-    moveq   #0, d7
-    bsr     MakeObj
-.ss_done:
-    movem.l (sp)+, d0-d7/a0
     rts
 
 ;---------------------------------------------------------------------------
@@ -588,19 +585,6 @@ InitOpList:
     or.l    #((LINK_LO_STOP<<24)|(CC_YPOS_GT<<14)|OBJ_TYPE_BRANCH), d0
     move.l  d0, OP_BR_VDB+4
 
-; The world backdrop: opaque, the game screen's rows 0..137.
-    lea     OBJ_SHADOW+(OBJ_BACKDROP*OBJ_STRIDE), a0
-    move.l  #BACKDROP_BUF, d0
-    moveq   #0, d1
-    move.w  VDB_VAL, d1
-    add.w   #(GAME_Y*2), d1
-    move.l  #VIEW_H, d2
-    moveq   #0, d3
-    move.l  #GAME_IWIDTH, d4
-    move.l  #GAME_IWIDTH, d5
-    moveq   #0, d7
-    bsr     MakeObj
-
 ; The dashboard, in two objects over the same pixels.  Rows 129..137 overlap
 ; the viewport and are transparent there; from row 138 down the original's
 ; index-0 pixels show palette entry 0, so that part is opaque.
@@ -628,8 +612,8 @@ InitOpList:
     moveq   #0, d7
     bsr     MakeObj
 
-; The ship, between the two: from the pose c_init has just published.
-    bsr     SetShip
+; The viewport: frame 1, which c_init has already rendered.
+    bsr     SetView
 
     bsr     ArmObjects
     move.l  #OP_BR_VDE, d0
@@ -733,6 +717,22 @@ ViHandler:
     move.w  #INT1_ENA|C_VIDCLR, INT1
     move.w  #0, INT2
     rte
+
+;---------------------------------------------------------------------------
+; LoadTrek: the road's span blocks (trekg.bin, laid out by tools/sr2jag.py
+; for the GPU) into DRAM, where the GPU reads them every frame.
+;---------------------------------------------------------------------------
+LoadTrek:
+    movem.l d0/a0-a1, -(sp)
+    movea.l #ROM_TREKG, a0
+    movea.l #TREKG_BUF, a1
+    move.l  #(TREKG_BUF_SIZE/32), d0
+    bsr     Copy32
+    movem.l (sp)+, d0/a0-a1
+    rts
+
+; The GPU's code: its own section and .org, so it goes LAST.
+    .include "src/gpu_road.s"
 
 CodeEnd:
     .end

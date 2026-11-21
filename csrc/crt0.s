@@ -13,3 +13,4 @@
 entry_table:
 	jmp	c_init
 	jmp	c_tick
+	jmp	c_render

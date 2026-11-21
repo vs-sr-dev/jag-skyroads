@@ -42,24 +42,17 @@ ROMs (`build/`) are git-ignored.
 | layer clears | Blitter | one large fill per layer per frame |
 | SFX, music (OPL2 synthesis), engine hum | **DSP** | the hum follows the speed: it has to be synthesised live |
 
-### The screen as OP layers
+### The screen
 
-The original repaints a 320x200 frame from a pristine copy every tick. Here the
-frame is layers the OP composes as the beam goes by, back to front:
+The viewport is ONE 320x138 8-bit frame buffer, double-buffered, composed in
+the original's painter's order: GPU (backdrop copy + records before the ship),
+68000 (ship, shadow), GPU (records after the ship). The OP shows it and the
+dashboard over it (transparent band on rows 129..137, opaque below).
 
-1. **backdrop**: the world picture, rows 0..137, opaque, static per road;
-2. **road A**: grid rows far..ship row "pre-ship" records (renderer.md §3),
-   8 bpp, index 0 transparent; the ship's shadow is applied here;
-3. **ship**: a 32x24 sprite object (explosion frames too);
-4. **road B**: the ship row's "post-ship" records and the two nearer rows —
-   the geometry the original draws over the ship;
-5. **dashboard**: rows 129..199, transparent over the viewport's last rows;
-   the gauges are drawn into it.
-
-Painter's order is preserved exactly: B over the ship over A is what the
-original's draw order produces, and the shadow only ever touches what was
-drawn before it (road A). Road layers are double-buffered and swapped in the
-video interrupt.
+The first M2 design stacked backdrop, road A, ship and road B as OP objects:
+pixel-exact offline, but three full-width 8-bit objects on the same line
+stopped the real Jaguar dead (blue screen, the 68000 never woke). Two per line
+work (M1). Bisected on hardware: GPU off still dead, road objects off alive.
 
 ### Time
 
@@ -78,9 +71,13 @@ A new frame is rendered once per tick.
   same `play.c` and `csrc/shared.h`, same cartridge blobs) byte for byte:
   position, speed, fuel, oxygen, ship frame and screen position. The ship is
   an OP object; 36.0036 Hz ticks from a rational accumulator in the VI.
-- **M2 — the road.** 68000 composers emit a draw list; GPU span filler into
-  road A/B; shadow; frames compared with the reference port's renderer
-  (golden images generated offline).
+- **M2 — DONE on hardware (session 1).** The 68000 runs the original's
+  composers (`csrc/road.c`) and emits a command list; the GPU
+  (`src/gpu_road.s`) copies the backdrop and fills the spans; the 68000 draws
+  the ship and its shadow between the GPU's two launches; the OP shows one
+  320x138 frame buffer plus the dashboard. Offline, the whole frame matches
+  skyroads-port's renderer pixel for pixel on all 1775 demo ticks, except
+  the shadow, where the port is wrong (below).
 - **M3 — playable.** Pad input, all 30 roads, death/explosion, road complete,
   dashboard gauges (fuel, oxygen, speed, gravity, jump-o-master).
 - **M4 — sound.** SFX through the DSP PCM driver (Keen Dreams); music as OPL2
@@ -100,6 +97,12 @@ segment addresses `re/notes/` gives, and checks them. Small gameplay
 constants inside `play.c` stay where the reimplementation put them.
 
 ## Known lessons (this project)
+
+- skyroads-port's shadow stencils (ds:0x65e) are ROW-major 9x29 (each is the
+  ship's silhouette from above), not column-major as its render.c reads them:
+  vertical bars instead of a shadow. Seen on hardware by the user; the offline
+  check could not see it because it compares WITH the port.
+- At most two full-width 8-bit objects per line on the OP (see "The screen").
 
 - A false branch object falls through to the NEXT PHRASE, not to its link:
   the two head branches and the first object must be adjacent (M0, hardware).

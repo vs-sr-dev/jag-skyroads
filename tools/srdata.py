@@ -166,6 +166,31 @@ def expand_trek(packed, raw_size):
     return bytes(out)
 
 
+#: File offset of the data segment in SKYROADS.EXE: the 0x200-byte MZ header
+#: plus 0x66E0, the offset skyroads-port's notes give into the load image.
+EXE_DS = 0x68E0
+
+
+def exe_tables(src):
+    """Tables of the original's data segment, read from the user's EXE.
+    Anchored by two signatures whose values the reimplemented physics already
+    fixes (play.c / render.c): if they do not match, this is another build of
+    the EXE and nothing else read from it can be trusted."""
+    exe = src.read('SKYROADS.EXE')
+    pan = struct.unpack_from('<7h', exe, EXE_DS + 0x38)
+    top = struct.unpack_from('<6H', exe, EXE_DS + 0xDE)
+    if pan != (-1, -1, -1, 0, 1, 2, 4) or top != (0x2800, 0x3200, 0x3200, 0x3200, 0x3C00, 0x3C00):
+        raise SystemExit("SKYROADS.EXE: data segment signatures not found - unknown EXE version")
+    return {
+        # ds:0x322: 74 x {VGA left, VGA right, EGA left, EGA right} fill bytes
+        'quad': exe[EXE_DS + 0x322:EXE_DS + 0x322 + 74 * 4],
+        # ds:0x65e: 5 shadow stencils, 29 columns x 9 rows, column-major
+        'shadow': exe[EXE_DS + 0x65E:EXE_DS + 0x65E + 5 * 261],
+        # ds:0x44a: dashboard cowl half-width per viewport row (138 u16)
+        'cowl': struct.unpack_from('<138H', exe, EXE_DS + 0x44A),
+    }
+
+
 def vga_rgb8(c):
     """6-bit VGA DAC -> 8-bit, the usual (c<<2)|(c>>4)."""
     return tuple((v << 2) | (v >> 4) for v in c)
