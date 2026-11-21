@@ -1,7 +1,7 @@
 """Bluemoon LZS bitstream and decompressor.
 
 The algorithm was recovered from SKYROADS.EXE (routine at 0x6660) by the
-skyroads-port project (Ammaar Reshi, MIT License,
+skyroads-port project (github.com/ammaarreshi/skyroads-port, MIT License,
 Copyright (c) 2026 Ammaar Reshi); see its docs/FORMATS.md section 1.  This is a
 re-implementation of that specification.
 
