@@ -28,7 +28,7 @@ Blobs:
   roads.bin      index of 31 x 16 bytes, then per road rows*7 u16 tile codes.
   trek.bin       index of 8 x 8 bytes, then the 8 expanded span objects
                  (little-endian inside, as the original has them).
-  demo.bin       DEMO.REC verbatim.
+  demo.bin       u32 length, then DEMO.REC verbatim.
 """
 import os
 import struct
@@ -181,7 +181,8 @@ def main(argv):
         body += pad8(o)
     write('trek.bin', bytes(index + body))
 
-    write('demo.bin', pad8(src.read('DEMO.REC')))
+    demo = src.read('DEMO.REC')
+    write('demo.bin', pad8(struct.pack('>I', len(demo)) + demo))
 
     # --- previews: what the Jaguar should show, from the blobs ------------------
     clut = cluts[1]

@@ -112,8 +112,32 @@ BG_PROBE        EQU     1
 C_ALLCLR        EQU     $1F00
 INT1_ENA        EQU     C_VIDENA
 
-; Frames each world stays on screen in the M0 slideshow.
-SLIDE_FRAMES    EQU     150
+;   COL_OK_A   $003F  green      COL_OK_B   $0018  dark green
+;   COL_BAD_A  $F800  red        COL_BAD_B  $6000  dark red
+COL_OK_A        EQU     $003F
+COL_OK_B        EQU     $0018
+COL_BAD_A       EQU     $F800
+COL_BAD_B       EQU     $6000
+
+;---------------------------------------------------------------------------
+; Game time: 36.0036 Hz (PIT divisor 6628, 2 phases of 10: FORMATS.md sec.9)
+; against the video interrupt's rate, both in units of 1e-4 Hz.  The VI
+; rate is the frame rate of the timing above: 26.590906 MHz / 1690 clocks
+; per line / 262 lines = 60.0544 Hz NTSC; 26.5939 MHz / 1702 / 312 =
+; 50.0805 Hz PAL.  The ISR adds GAME_HZ_E4 every frame and a tick falls due
+; every time the sum passes TICK_DIV.
+;---------------------------------------------------------------------------
+GAME_HZ_E4      EQU     360036
+NTSC_VI_E4      EQU     600544
+PAL_VI_E4       EQU     500805
+MAX_CATCHUP     EQU     4
+
+; The attract demo runs on road 0 (game.c: world 0 for the demo).
+DEMO_ROAD       EQU     0
+
+; The ship sprite: 32x24 at 8 bpp = 4 phrases a row.
+SHIP_IW         EQU     4
+SHIP_H          EQU     (CAR_BYTES/32)
 
 ; Boot stages for BOOT_MARK.
 BM_START        EQU     1
@@ -122,6 +146,7 @@ BM_CLUT         EQU     3
 BM_ASSETS       EQU     4
 BM_OPLIST       EQU     5
 BM_LOOP         EQU     6
+BM_C_BAD        EQU     $BAD0
 
 ;===========================================================================
 ; THE COLD BOOT RUNS FROM THE CARTRIDGE; EVERYTHING AFTER `jmp Start` FROM DRAM.
@@ -173,6 +198,17 @@ ColdBoot:
     lea     32(a1), a1
     dbra    d7, .cb_copy
 
+; The C blob too: code, rodata and data in one image.  Its .bss is in CBSS,
+; which the clear above has already zeroed.
+    movea.l #ROM_CBLOB, a0
+    movea.l #DBLOB, a1
+    move.w  #((ROM_CBLOB_SIZE/32)-1), d7
+.cb_blob:
+    movem.l (a0)+, d0-d6/a2
+    movem.l d0-d6/a2, (a1)
+    lea     32(a1), a1
+    dbra    d7, .cb_blob
+
     jmp     Start
 
 ;===========================================================================
@@ -186,14 +222,29 @@ Start:
     bsr     VideoOnMinimal
     move.l  #BM_VIDEO, BOOT_MARK
 
-    moveq   #1, d0                          ; road 1 = world 0
+    moveq   #DEMO_ROAD, d0                  ; the attract demo's road...
     bsr     LoadClut
     move.l  #BM_CLUT, BOOT_MARK
 
-    moveq   #0, d0
+    moveq   #0, d0                          ; ...and its world
     bsr     LoadWorld
     bsr     LoadDash
+    bsr     LoadCars
     move.l  #BM_ASSETS, BOOT_MARK
+
+;---------------------------------------------------------------------------
+; The C blob answers with a signature.  An empty region, a stale blob or an
+; entry added in the middle of the table all show up as "the 68000 jumped
+; into something that is not a function"; comparing the answer turns them
+; into Panic instead of a mystery.  It runs BEFORE the OP list because the
+; list's ship object is composed from the pose c_init publishes.
+;---------------------------------------------------------------------------
+    jsr     C_ENTRY_INIT
+    cmpi.l  #C_MAGIC, d0
+    beq.s   .st_cok
+    move.l  #BM_C_BAD, BOOT_MARK
+    bra     Panic
+.st_cok:
 
     bsr     InitOpList
     move.l  #BM_OPLIST, BOOT_MARK
@@ -210,44 +261,120 @@ Start:
     move.w  #COL_LOOP, BG
 
 ;---------------------------------------------------------------------------
-; The M0 loop: wait for the frame, and every SLIDE_FRAMES show the next world
-; with the palette of its first road (road = 3*world + 1).
+; The loop.  Right after the video interrupt (the furthest point from the
+; next one) the ship object is recomposed from the pose of the last tick, so
+; the handler never copies a half-written object.  Then the game ticks the
+; interrupt has counted since the last round are run: 36.0036 per second
+; against 60 (NTSC) or 50 (PAL) frames, i.e. most frames run one tick and
+; some none.  A backlog beyond MAX_CATCHUP is dropped rather than chased.
 ;---------------------------------------------------------------------------
-    moveq   #0, d6                          ; frames on this world
-    moveq   #0, d7                          ; current world
 MainLoop:
     move.l  IRQ_TICK, d5
 .ml_sync:
     move.l  IRQ_TICK, d0
     cmp.l   d5, d0
     beq.s   .ml_sync
+
     .if BG_PROBE=1
-    move.w  #COL_BEAT_A, d0
-    btst    #5, d5
-    beq.s   .ml_beat
-    move.w  #COL_BEAT_B, d0
-.ml_beat:
-    move.w  d0, BG
+    bsr     BgProbe
     .else
     move.w  #COL_BLACK, BG
     .endif
 
-    addq.w  #1, d6
-    cmpi.w  #SLIDE_FRAMES, d6
-    bne.s   MainLoop
+    bsr     SetShip
+
+    move.l  GAME_TICKS, d6
+    move.l  d6, d0
+    sub.l   GAME_DONE, d0
+    cmpi.l  #MAX_CATCHUP, d0
+    bls.s   .ml_tick
+    move.l  d6, d0
+    subq.l  #MAX_CATCHUP, d0
+    move.l  d0, GAME_DONE
+.ml_tick:
+    cmp.l   GAME_DONE, d6
+    beq.s   MainLoop
+    jsr     C_ENTRY_TICK
+    addq.l  #1, GAME_DONE
+    bra.s   .ml_tick
+
+;---------------------------------------------------------------------------
+; BgProbe: the margins beat every 32 frames, in colours that say how the
+; attract demo compares with the PC oracle (tools/oracle/demo_oracle.c):
+;   dim brown / dim teal   matching so far, no full run yet
+;   green / dark green     at least one whole run matched, tick for tick
+;   red / dark red         a tick differed (DEMO_BAD = which, +1)
+;---------------------------------------------------------------------------
+BgProbe:
+    move.w  #COL_BEAT_A, d0
+    move.w  #COL_BEAT_B, d1
+    tst.l   DEMO_RUNS
+    beq.s   .bp_bad
+    move.w  #COL_OK_A, d0
+    move.w  #COL_OK_B, d1
+.bp_bad:
+    tst.l   DEMO_BAD
+    beq.s   .bp_pick
+    move.w  #COL_BAD_A, d0
+    move.w  #COL_BAD_B, d1
+.bp_pick:
+    btst    #5, d5
+    beq.s   .bp_set
+    move.w  d1, d0
+.bp_set:
+    move.w  d0, BG
+    rts
+
+;---------------------------------------------------------------------------
+; SetShip: the ship's OP object from SHIP_FRAME/LEFT/TOP (written by C).
+; The OP does not clip at the top (ob.v: it compares VC >= YPOS, an object
+; starting above the window slides down instead of entering), so rows above
+; the game screen are skipped by advancing DATA and shortening HEIGHT.
+; Frame -1 (explosion over) = HEIGHT 0, which switches the object off.
+;---------------------------------------------------------------------------
+SetShip:
+    movem.l d0-d7/a0, -(sp)
+    lea     OBJ_SHADOW+(OBJ_SHIP*OBJ_STRIDE), a0
+    move.w  SHIP_FRAME, d0
+    bmi.s   .ss_off
+    mulu    #CAR_BYTES, d0
+    add.l   #CARS_BUF, d0
+    move.l  #SHIP_H, d2
+    move.w  SHIP_TOP, d6
+    ext.l   d6
+    bpl.s   .ss_y
+    neg.l   d6
+    cmp.l   d2, d6
+    bge.s   .ss_off
+    sub.l   d6, d2
+    lsl.l   #5, d6                          ; * 32 bytes per sprite row
+    add.l   d6, d0
     moveq   #0, d6
-    addq.w  #1, d7
-    cmpi.w  #N_WORLDS, d7
-    bne.s   .ml_w
+.ss_y:
+    moveq   #0, d1
+    move.w  VDB_VAL, d1
+    add.l   #(GAME_Y*2), d1
+    add.l   d6, d1
+    add.l   d6, d1                          ; YPOS counts half-lines
+    move.w  SHIP_LEFT, d3
+    ext.l   d3
+    moveq   #SHIP_IW, d4
+    moveq   #SHIP_IW, d5
+    move.l  #OBJ_TRANS, d7
+    bsr     MakeObj
+    bra.s   .ss_done
+.ss_off:
+    move.l  #CARS_BUF, d0
+    moveq   #0, d1
+    moveq   #0, d2
+    moveq   #0, d3
+    moveq   #SHIP_IW, d4
+    moveq   #SHIP_IW, d5
     moveq   #0, d7
-.ml_w:
-    move.w  d7, d0
-    bsr     LoadWorld
-    move.w  d7, d0
-    mulu    #3, d0
-    addq.w  #1, d0
-    bsr     LoadClut
-    bra.s   MainLoop
+    bsr     MakeObj
+.ss_done:
+    movem.l (sp)+, d0-d7/a0
+    rts
 
 ;---------------------------------------------------------------------------
 ; InitVectors: all 256 to Panic, then $100 (the Jaguar's only interrupt
@@ -292,6 +419,7 @@ InitVideoTiming:
     move.w  #N_HVS, HVS
     move.w  #N_HEQ, HEQ
     move.w  #60, TICK_HZ
+    move.l  #NTSC_VI_E4, TICK_DIV
     move.w  #N_VP, VP
     move.w  #N_VEB, VEB
     move.w  #N_VS, VS
@@ -311,6 +439,7 @@ InitVideoTiming:
     move.w  #P_HVS, HVS
     move.w  #P_HEQ, HEQ
     move.w  #50, TICK_HZ
+    move.l  #PAL_VI_E4, TICK_DIV
     move.w  #P_VP, VP
     move.w  #P_VEB, VEB
     move.w  #P_VS, VS
@@ -417,6 +546,17 @@ LoadDash:
     movem.l (sp)+, d0/a0-a1
     rts
 
+; The 77 ship/explosion frames into DRAM: the OP reads them every line the
+; ship covers, and the cartridge is the slowest memory in the machine.
+LoadCars:
+    movem.l d0/a0-a1, -(sp)
+    movea.l #ROM_CARS, a0
+    movea.l #CARS_BUF, a1
+    move.l  #((CAR_BYTES*CAR_FRAMES)/32), d0
+    bsr     Copy32
+    movem.l (sp)+, d0/a0-a1
+    rts
+
 ;---------------------------------------------------------------------------
 ; InitOpList:
 ;   OP_BR_VDE  if YPOS < VC -> STOP  (below the window)
@@ -461,19 +601,35 @@ InitOpList:
     moveq   #0, d7
     bsr     MakeObj
 
-; The dashboard: transparent, rows 129..199.  Its index-0 pixels show what is
-; under it: the viewport in rows 129..137, the BG (black) below.
-    lea     OBJ_SHADOW+(OBJ_DASH*OBJ_STRIDE), a0
+; The dashboard, in two objects over the same pixels.  Rows 129..137 overlap
+; the viewport and are transparent there; from row 138 down the original's
+; index-0 pixels show palette entry 0, so that part is opaque.
+    lea     OBJ_SHADOW+(OBJ_DASH_TOP*OBJ_STRIDE), a0
     move.l  #DASH_BUF, d0
     moveq   #0, d1
     move.w  VDB_VAL, d1
     add.w   #((GAME_Y+DASH_Y)*2), d1
-    move.l  #DASH_H, d2
+    move.l  #DASH_TOP_H, d2
     moveq   #0, d3
     move.l  #GAME_IWIDTH, d4
     move.l  #GAME_IWIDTH, d5
     move.l  #OBJ_TRANS, d7
     bsr     MakeObj
+
+    lea     OBJ_SHADOW+(OBJ_DASH_BOT*OBJ_STRIDE), a0
+    move.l  #(DASH_BUF+(DASH_TOP_H*SCR_W)), d0
+    moveq   #0, d1
+    move.w  VDB_VAL, d1
+    add.w   #((GAME_Y+VIEW_H)*2), d1
+    move.l  #(DASH_H-DASH_TOP_H), d2
+    moveq   #0, d3
+    move.l  #GAME_IWIDTH, d4
+    move.l  #GAME_IWIDTH, d5
+    moveq   #0, d7
+    bsr     MakeObj
+
+; The ship, between the two: from the pose c_init has just published.
+    bsr     SetShip
 
     bsr     ArmObjects
     move.l  #OP_BR_VDE, d0
@@ -562,7 +718,17 @@ MakeObj:
 ; ViHandler: count, re-arm the list, acknowledge (C_VIDCLR + INT2).
 ;---------------------------------------------------------------------------
 ViHandler:
+    move.l  d0, -(sp)
     addq.l  #1, IRQ_TICK
+    move.l  TICK_ACC, d0
+    add.l   #GAME_HZ_E4, d0
+    cmp.l   TICK_DIV, d0
+    blo.s   .vh_acc
+    sub.l   TICK_DIV, d0
+    addq.l  #1, GAME_TICKS
+.vh_acc:
+    move.l  d0, TICK_ACC
+    move.l  (sp)+, d0
     bsr     ArmObjects
     move.w  #INT1_ENA|C_VIDCLR, INT1
     move.w  #0, INT2

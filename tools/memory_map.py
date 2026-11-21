@@ -31,8 +31,12 @@ ROM_CBLOB_SIZE = 0x20000
 
 # Switches that more than one party reads (RMAC, linker script, C).
 SWITCHES = {
-    'C_BLOB': 0,                 # M0 has no C blob: one suspect per fault
+    'C_BLOB': 1,                 # the game logic, compiled C (M1)
 }
+
+# The C blob's signature, returned by c_init: 'SKY1'.
+C_MAGIC = 0x534B5931
+CBSS_SIZE = 0x10000
 
 # --- the game screen inside the 320x240 progressive frame ------------------
 SCR_W = 320
@@ -63,12 +67,34 @@ HAL_CELLS = [
     ('PAD_STATE', 4),
     ('PAD_PREV', 4),
     ('PAD_EDGE', 4),
+    # 36.0036 Hz game time.  ONE WRITER EACH: the video interrupt advances
+    # TICK_ACC and GAME_TICKS, the main loop advances GAME_DONE; the ticks
+    # still to run are the difference.
+    ('TICK_ACC', 4),             # ISR only
+    ('TICK_DIV', 4),             # set at boot: VI rate in 1e-4 Hz
+    ('GAME_TICKS', 4),           # ISR only
+    ('GAME_DONE', 4),            # main loop only
+    # Written by the C blob after every tick, read by RMAC (SetShip).
+    ('SHIP_FRAME', 2),           # CARS frame, -1 = none
+    ('SHIP_LEFT', 2),            # screen x of the sprite
+    ('SHIP_TOP', 2),             # screen y of the sprite
+    # The attract demo checked against the PC oracle (C writes, RMAC reads).
+    ('DEMO_TICK', 4),            # ticks into the current run
+    ('DEMO_BAD', 4),             # first mismatching tick + 1, 0 = all match
+    ('DEMO_RUNS', 4),            # completed runs that matched to the end
 ]
 
 # --- OP objects, in LIST ORDER = priority (whoever is drawn last wins) -------
 OBJECTS = [
     'BACKDROP',                  # the world picture, opaque, rows 0..137
-    'DASH',                      # the dashboard, transparent, rows 129..199
+    'SHIP',                      # the ship sprite, 32x24, transparent
+    # The dashboard is TWO objects over the same pixels.  In the original its
+    # index-0 pixels are transparent only where they overlap the viewport
+    # (rows 129..137); below, the pristine screen holds 0 there and they show
+    # palette entry 0.  One transparent object let the BG register through
+    # (seen on hardware, M1).
+    'DASH_TOP',                  # rows 129..137, transparent
+    'DASH_BOT',                  # rows 138..199, opaque
 ]
 
 # --- DRAM regions: (name, size, align). Laid out in this order. -------------
@@ -84,6 +110,11 @@ def dram_regions():
         ('OBJ_SHADOW', 32 * n_obj, 32),
         ('STACK', 0x2000, 8),
         ('DCODE', ROM_CODE_SIZE, 8),
+        # The C blob runs from DRAM: ColdBoot copies the whole image (code,
+        # rodata, data) here; .bss lives apart in CBSS, which the DRAM clear
+        # has already zeroed and the copy does not touch.
+        ('DBLOB', ROM_CBLOB_SIZE, 8),
+        ('CBSS', CBSS_SIZE, 8),
         ('BACKDROP_BUF', WORLD_BYTES, 64),
         ('DASH_BUF', DASH_BYTES, 64),
         ('CARS_BUF', CAR_BYTES * CAR_FRAMES, 64),
@@ -99,6 +130,7 @@ CART_BLOBS = [
     ('ROM_ROADS', 'roads.bin'),
     ('ROM_TREK', 'trek.bin'),
     ('ROM_DEMO', 'demo.bin'),
+    ('ROM_DEMOX', 'demo_expect.bin'),   # tools/oracle/demo_oracle.c
 ]
 
 
@@ -188,9 +220,12 @@ def main():
     for i, o in enumerate(OBJECTS):
         eq.append(('OBJ_' + o, i, 'index in the list'))
     eq += [(k, v, 'switch') for k, v in SWITCHES.items()]
+    eq += [('C_MAGIC', C_MAGIC, "c_init's answer"),
+           ('C_ENTRY_INIT', regs['DBLOB'][0], 'C entry table: jmp c_init'),
+           ('C_ENTRY_TICK', regs['DBLOB'][0] + 6, 'C entry table: jmp c_tick')]
     eq += [('SCR_W', SCR_W, None), ('SCR_H', SCR_H, None), ('GAME_H', GAME_H, None),
            ('GAME_Y', GAME_Y, None), ('VIEW_H', VIEW_H, None), ('DASH_Y', DASH_Y, None),
-           ('DASH_H', DASH_H, None), ('WORLD_BYTES', WORLD_BYTES, None),
+           ('DASH_H', DASH_H, None), ('DASH_TOP_H', VIEW_H - DASH_Y, None), ('WORLD_BYTES', WORLD_BYTES, None),
            ('WORLD_STRIDE', align(WORLD_BYTES, 8), None), ('DASH_BYTES', DASH_BYTES, None),
            ('CAR_BYTES', CAR_BYTES, None), ('CAR_FRAMES', CAR_FRAMES, None),
            ('CLUT_BYTES', 512, None), ('N_ROADS', 31, None), ('N_WORLDS', 10, None)]
@@ -211,6 +246,26 @@ def main():
         for n, v, c in eq:
             f.write(f'#define {n:<16} 0x{v:X}u\n')
         f.write('\n#endif\n')
+
+    with open(os.path.join(REPO, 'include', 'jag_c.ld'), 'w', newline='\n') as f:
+        f.write(f'''/* {hdr} */
+OUTPUT_ARCH(m68k)
+ENTRY(entry_table)
+
+MEMORY
+{{
+    BLOB (rwx) : ORIGIN = 0x{regs['DBLOB'][0]:X}, LENGTH = 0x{regs['DBLOB'][1]:X}
+    BSS  (rw)  : ORIGIN = 0x{regs['CBSS'][0]:X}, LENGTH = 0x{regs['CBSS'][1]:X}
+}}
+
+SECTIONS
+{{
+    .text : {{ *(.entry) *(.text*) *(.rodata*) . = ALIGN(4); }} > BLOB
+    .data : {{ *(.data*) . = ALIGN(4); }} > BLOB
+    .bss (NOLOAD) : {{ *(.bss*) *(COMMON) . = ALIGN(4); }} > BSS
+    /DISCARD/ : {{ *(.comment) *(.note*) *(.eh_frame*) }}
+}}
+''')
 
     with open(os.path.join(REPO, 'build', 'layout.txt'), 'w') as f:
         f.write('DRAM\n')

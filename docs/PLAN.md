@@ -72,11 +72,12 @@ A new frame is rendered once per tick.
 - **M0 — DONE on hardware (session 1).** Converter, memory map, cartridge
   packer, boot from the cartridge, 240p video, OP list with backdrop and
   dashboard, all ten worlds cycling with their palettes.
-- **M1 — the game logic on the 68000.** C blob with `play.c`/`tables.c`;
-  the attract demo (`DEMO.REC` on road 0) replays on the Jaguar and its
-  per-tick state (z, x, y, speed) matches the PC reference port, compared as
-  a checksum table generated at build time. On screen: the ship sprite as an
-  OP object moving over the backdrop.
+- **M1 — DONE on hardware (session 1).** C blob (skyroads-port's `play.c`,
+  run from DRAM); the attract demo (`DEMO.REC` on road 0) replays on the
+  68000 and all 1775 ticks match the PC oracle (`tools/oracle/demo_oracle.c`,
+  same `play.c` and `csrc/shared.h`, same cartridge blobs) byte for byte:
+  position, speed, fuel, oxygen, ship frame and screen position. The ship is
+  an OP object; 36.0036 Hz ticks from a rational accumulator in the VI.
 - **M2 — the road.** 68000 composers emit a draw list; GPU span filler into
   road A/B; shadow; frames compared with the reference port's renderer
   (golden images generated offline).
@@ -89,9 +90,21 @@ A new frame is rendered once per tick.
 - **M6 — distribution.** BYOA package (`make_rom.py` + prebuilt engine),
   optional aspect correction (OP scaled objects: mode 13h pixels are 1.2:1).
 
+## Data that lives in SKYROADS.EXE
+
+skyroads-port's `tables.c` holds tables extracted from the EXE (colour quads,
+cowl silhouette, shadow stencils, digit stencils, jump-o-master stamps). They
+are Bluemoon data, so they are NOT copied here: when M2/M3 need them,
+`tools/sr2jag.py` extracts them from the user's `SKYROADS.EXE` at the data
+segment addresses `re/notes/` gives, and checks them. Small gameplay
+constants inside `play.c` stay where the reimplementation put them.
+
 ## Known lessons (this project)
 
 - A false branch object falls through to the NEXT PHRASE, not to its link:
   the two head branches and the first object must be adjacent (M0, hardware).
+- The dashboard is transparent only over the viewport (rows 129..137); below,
+  its zero pixels show palette entry 0. One transparent object let the BG
+  register through (M1, hardware): two objects over the same pixels.
 - BigPEmu's frame-event script did not run here (no frame ever reached); the
   hardware, with the BG-register stage colours, was the faster instrument.
