@@ -11,7 +11,8 @@
  *   one starts again (the original replays it at once: game.c, main 0x3b4).
  *   PAUSE pauses, OPTION goes back to the demo.  On the KEYPAD, never on the
  *   game controls: * and # step to the previous / next road (a test
- *   instrument until the road menu exists).
+ *   instrument until the road menu exists), 0 shows the frame's timings,
+ *   9 checks the GPU's composers against road_compose (below).
  *
  * The boundary with RMAC is memory cells: PAD_STATE/PAD_KEYS in, GAME_MODE,
  * ROAD_SEQ and the demo check out.
@@ -34,10 +35,17 @@
 #define CLUT_REG 0xF00400u
 
 /* Two truths that live in two places, checked where both are visible. */
-_Static_assert(VIEW_BYTES == VIEW0_SIZE, "frame buffer size: csrc/road.h vs tools/memory_map.py");
+_Static_assert(VIEW_BYTES == VIEW0_SIZE && VIEW_BYTES == VIEW1_SIZE && VIEW_BYTES == VIEW2_SIZE,
+               "frame buffer size: csrc/road.h vs tools/memory_map.py");
 _Static_assert(VIEW_ROWS == GAME_H, "screen rows: csrc/road.h vs tools/memory_map.py");
 _Static_assert(CAR_FRAME_BYTES == CAR_BYTES, "ship frame size: csrc/road.h vs tools/memory_map.py");
 _Static_assert(ROAD_CMD_MAX * 4 <= CMD_BUF_SIZE, "command list does not fit CMD_BUF");
+_Static_assert(ROAD_CMD_MAX * 4 <= CMD_CHK_SIZE, "command list does not fit CMD_CHK");
+_Static_assert(COMP_POS == COMP_IN + CIN_POS && COMP_BASE == COMP_IN + CIN_BASE
+               && COMP_QUAD0 == COMP_IN + CIN_QUAD0 && COMP_QUAD1 == COMP_IN + CIN_QUAD1
+               && COMP_WIN == COMP_IN + CIN_WIN && COMP_ROWS == CIN_ROWS
+               && CIN_BYTES <= COMP_IN_SIZE,
+               "GPU composers' input: csrc/road.h CIN_* vs tools/memory_map.py");
 
 /* Ceiling of the wait for DONE, in polls (about a second).  The wait must
  * never be without an exit: a stuck GPU becomes a number (GPU_FAIL). */
@@ -88,6 +96,17 @@ static int perf_on;
 static uint8_t pf_fg, pf_bg;      /* brightest / darkest entry of the CLUT */
 static uint32_t pf_tick, pf_fps_count, pf_fps, pf_fps_mark;
 static uint32_t pf_sum[6], pf_shown[7];   /* per-second sums, latched averages */
+static int ovl_dirty;             /* the overlay buffer needs redrawing */
+
+/* ---- CHECK: an instrument on the KEYPAD (key 9), off by default ---------
+ * One question: does the GPU compose, on the real machine, the list
+ * road_compose composes?  (The PC answers it for the logic, running the GPU
+ * binary in an interpreter: tools/oracle/gpu_check.py; this answers it for
+ * the hardware.)  While on, every frame is composed a second time by the
+ * 68000 into CMD_CHK and compared, both lists and the second launch's
+ * address; on screen, third row: frames checked, frames that differed. */
+static int check_on;
+static uint32_t chk_frames, chk_bad;
 
 static uint32_t clock_hl(void)
 {
@@ -113,7 +132,15 @@ static int demo;              /* 1: attract demo */
 static int entry;             /* the road being played, 1..30 */
 static int paused;
 static uint16_t pad_prev, keys_prev;
-static hud_state hud_st[2];   /* what each frame buffer's dashboard shows */
+/* THREE frame buffers: the one on screen, the one the next video interrupt
+ * will show (SetView only updates OBJ_SHADOW, which the interrupt copies:
+ * a swap takes effect one interrupt late), and the one being drawn.  With
+ * two, the frame being drawn was often the one on screen: the road flickered
+ * (session 2, hardware). */
+#define N_VIEWS 3
+static const uint32_t views[N_VIEWS] = { VIEW0, VIEW1, VIEW2 };
+static int view_next;          /* the buffer the next frame goes into */
+static hud_state hud_st[N_VIEWS];   /* what each frame buffer's dashboard shows */
 
 /* A road from scratch: grid, pristine screen (its world + the dashboard),
  * palette.  The original loads all three at road start (game.c start_road,
@@ -140,7 +167,8 @@ static void road_start(int e, int is_demo)
     else
         sr_play_init(&play, &road, NULL, 0);
     demo = is_demo;
-    hud_st[0].valid = hud_st[1].valid = 0;
+    for (int i = 0; i < N_VIEWS; i++)
+        hud_st[i].valid = 0;
     result = SR_RES_RUNNING;
     hold = 0;
     paused = 0;
@@ -159,6 +187,7 @@ uint32_t c_init(void)
 {
     HW32(DEMO_BAD) = 0;
     HW32(DEMO_RUNS) = 0;
+    road_gpu_quads((uint8_t *)(uintptr_t)COMP_IN, (const uint8_t *)(uintptr_t)ROM_TABLES);
     road_start(0, 1);
     c_render();                 /* frame 1 ready before the OP list exists */
     return C_MAGIC;
@@ -209,6 +238,12 @@ void c_tick(void)
     uint32_t t0 = perf_on ? clock_hl() : 0;
     if (HW16(PAD_KEYS) & ~keys_prev & PADB(KEY_B_0))
         perf_on = !perf_on;
+    if (HW16(PAD_KEYS) & ~keys_prev & PADB(KEY_B_9)) {
+        check_on = !check_on;
+        chk_frames = chk_bad = 0;
+    }
+    if (HW16(PAD_KEYS) & ~keys_prev & (PADB(KEY_B_0) | PADB(KEY_B_9)))
+        ovl_dirty = 1;
     c_tick_inner();
     if (perf_on)
         pf_tick += clock_hl() - t0;
@@ -314,13 +349,79 @@ static void blit_view(uint32_t dst, uint32_t src)
 }
 
 /* One frame, after the ticks of this video frame.  Frame k is drawn into
- * VIEW(k&1) while RMAC shows k-1 from the other; ROAD_SEQ = k hands it over,
- * and RMAC points the OP at it at the next video interrupt. */
-static void gpu_launch(uint32_t list)
+ * views[view_next] while the OP shows k-1 or k-2 from the others; ROAD_VIEW
+ * and ROAD_SEQ = k hand it over, RMAC's SetView points OBJ_SHADOW at it, and
+ * the video interrupt after that puts it on screen. */
+static void gpu_launch(void)
 {
-    HW32(GPU_CMD) = list;
     if (!gpu_run(G_RAM))
         HW32(GPU_FAIL) = HW32(GPU_FAIL) + 1;
+}
+
+/* The instruments' numbers live in OVL_BUF (320 wide, like a frame): drawn
+ * there once a second, when they are latched, and copied into every frame
+ * by the Blitter - the frame's top rows are restored from the pristine
+ * screen every time, and redrawing the digits there each frame cost more
+ * than what they measured (M3, hardware).  Rows: timings (two) and the
+ * CHECK's counters (one), 240 columns. */
+#define OVL_W      240
+#define OVL_ROWS   76
+#define OVL_STEP   ((1u << 16) | (uint16_t)(-OVL_W))
+
+static void ovl_draw(void)
+{
+    const uint8_t *hud = (const uint8_t *)(uintptr_t)ROM_HUD;
+    uint8_t *o = (uint8_t *)(uintptr_t)OVL_BUF;
+    uint32_t bg4 = pf_bg * 0x01010101u;
+    for (int y = 0; y < OVL_ROWS; y++) {
+        uint32_t *q = (uint32_t *)(void *)(o + (int32_t)(int16_t)y * 320);
+        for (int i = 0; i < OVL_W / 4; i++)
+            q[i] = bg4;
+    }
+    if (perf_on)
+        /* row 1: ticks, compose, gpu1, ship+shadow; row 2: gpu2, gauges, fps */
+        for (int i = 0; i < 7; i++)
+            hud_number(o, hud, 6 + 60 * (i % 4), 6 + 24 * (i / 4), pf_shown[i], 3, 3, pf_fg, pf_bg);
+    if (check_on) {
+        hud_number(o, hud, 6, 54, chk_frames, 5, 3, pf_fg, pf_bg);
+        hud_number(o, hud, 126, 54, chk_bad, 5, 3, pf_fg, pf_bg);
+    }
+}
+
+static void ovl_blit(uint32_t view)
+{
+    blit_wait();
+    HW32(JAG_A1_BASE) = view;
+    HW32(JAG_A1_FLAGS) = BLIT_FLAGS;
+    HW32(JAG_A1_CLIP) = 0;
+    HW32(JAG_A1_STEP) = OVL_STEP;
+    HW32(JAG_A2_BASE) = OVL_BUF;
+    HW32(JAG_A2_FLAGS) = BLIT_FLAGS;
+    HW32(JAG_A2_STEP) = OVL_STEP;
+    HW32(JAG_A1_PIXEL) = 0;
+    HW32(JAG_A2_PIXEL) = 0;
+    HW32(JAG_B_COUNT) = ((uint32_t)OVL_ROWS << 16) | OVL_W;
+    HW32(JAG_B_CMD) = BLIT_CMD;
+    blit_wait();
+}
+
+/* The CHECK instrument (above): road_compose into CMD_CHK, compared with
+ * the GPU's CMD_BUF up to each list's end. */
+static void check_lists(road_ctx *c)
+{
+    const uint32_t *gpu = (const uint32_t *)(uintptr_t)CMD_BUF;
+    c->cmd = (uint32_t *)(uintptr_t)CMD_CHK;
+    road_compose(c, &play);
+    int bad = HW32(GPU_CMD) != CMD_BUF + 4u * (uint32_t)c->second;
+    int ends = 0;
+    for (int i = 0; ends < 2 && i < ROAD_CMD_MAX && !bad; i += 2) {
+        if (gpu[i] != c->cmd[i] || gpu[i + 1] != c->cmd[i + 1])
+            bad = 1;
+        if (c->cmd[i] == ROAD_OP_END)
+            ends++;
+    }
+    chk_frames++;
+    chk_bad += (uint32_t)bad;
 }
 
 void c_render(void)
@@ -330,32 +431,40 @@ void c_render(void)
     c.trekg = (const uint8_t *)(uintptr_t)TREKG_BUF;
     c.trekg_at = TREKG_BUF;
     c.tables = (const uint8_t *)(uintptr_t)ROM_TABLES;
-    c.view = (k & 1) ? VIEW1 : VIEW0;
+    int vb = view_next;
+    c.view = views[vb];
     c.pristine = PRISTINE;
     c.cmd = (uint32_t *)(uintptr_t)CMD_BUF;
     uint8_t *view = (uint8_t *)(uintptr_t)c.view;
 
     uint32_t t[6];
     t[0] = perf_on ? clock_hl() : 0;
-    /* 0. the Blitter restores the viewport while the 68000 composes */
-    blit_view(c.view, PRISTINE);
-    road_compose(&c, &play);
+    /* The GPU's input first, on a free bus: during a blit the 68000 barely
+     * gets a cycle (with the blit started first this phase measured ~120
+     * half-lines, M3, hardware).  0. Then the Blitter restores the viewport
+     * while the GPU composes; the GPU waits for it before the first span
+     * (src/gpu_road.s). */
+    road_gpu_input((uint8_t *)(uintptr_t)COMP_IN, &play, c.view);
     ship_pose_t s = ship_pose(&play, play.tick, play.on_sticky);
+    blit_view(c.view, PRISTINE);
     t[1] = perf_on ? clock_hl() : 0;
 
-    /* 1. records before the ship (GPU); 2. ship and shadow (68000);
-     * 3. records after the ship (GPU); 4. gauges, incrementally (68000).
+    /* 1. composers and the records before the ship (GPU); 2. ship and
+     * shadow (68000); 3. records after the ship (GPU, from the address the
+     * first launch left in GPU_CMD); 4. gauges, incrementally (68000).
      * The GPU's epilogue pushes its pixels out before DONE. */
-    blit_wait();
-    gpu_launch(CMD_BUF);
+    HW32(GPU_CMD) = 0;
+    gpu_launch();
+    if (check_on)
+        check_lists(&c);
     t[2] = perf_on ? clock_hl() : 0;
     road_ship(&c, view, (const uint8_t *)(uintptr_t)CARS_BUF, s);
     road_shadow(&c, view, &play, s);
     t[3] = perf_on ? clock_hl() : 0;
-    gpu_launch(CMD_BUF + 4u * (uint32_t)c.second);
+    gpu_launch();
     t[4] = perf_on ? clock_hl() : 0;
     hud_update(view, (const uint8_t *)(uintptr_t)PRISTINE,
-               (const uint8_t *)(uintptr_t)ROM_HUD, &play, &hud_st[k & 1]);
+               (const uint8_t *)(uintptr_t)ROM_HUD, &play, &hud_st[vb]);
     t[5] = perf_on ? clock_hl() : 0;
 
     /* Numbers that change 36 times a second cannot be read off a television
@@ -374,14 +483,18 @@ void c_render(void)
         }
         pf_shown[6] = pf_fps;
         pf_fps_count = 0;
-    }
-    if (perf_on) {
-        const uint8_t *hud = (const uint8_t *)(uintptr_t)ROM_HUD;
-        /* row 1: ticks, compose, gpu1, ship+shadow; row 2: gpu2, gauges, fps */
-        for (int i = 0; i < 7; i++)
-            hud_number(view, hud, 6 + 60 * (i % 4), 6 + 24 * (i / 4), pf_shown[i], 3, 3, pf_fg, pf_bg);
+        ovl_dirty = 1;
     }
     pf_tick = 0;
+    if (perf_on || check_on) {
+        if (ovl_dirty) {
+            ovl_draw();
+            ovl_dirty = 0;
+        }
+        ovl_blit(c.view);
+    }
 
+    HW32(ROAD_VIEW) = c.view;
     HW32(ROAD_SEQ) = k;
+    view_next = vb == N_VIEWS - 1 ? 0 : vb + 1;
 }

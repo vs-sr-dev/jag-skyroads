@@ -54,6 +54,13 @@ DASH_BYTES = 320 * 71
 CAR_BYTES = 32 * 24
 CAR_FRAMES = 77
 
+# The GPU composers' input block, csrc/road.h CIN_* (checked in game_main.c):
+# offsets the GPU adds to COMP_IN.
+CIN = {'POS': 0, 'BASE': 4, 'QUAD0': 16, 'QUAD1': 16 + 4 * 74, 'WIN': 16 + 8 * 74}
+CIN_ROWS = 11
+COMP_IN_SIZE = 0x400
+assert CIN['WIN'] + CIN_ROWS * 32 <= COMP_IN_SIZE
+
 # --- HAL cells: (name, size). Aligned to their size. -------------------------
 HAL_CELLS = [
     ('IRQ_TICK', 4),             # video interrupts since boot
@@ -71,6 +78,9 @@ HAL_CELLS = [
     ('PAD_STATE', 2),            # game buttons, PAD_B_* bits
     ('PAD_KEYS', 2),             # keypad, KEY_B_* bits (instruments only)
     ('GAME_MODE', 2),            # C only: 0 attract demo, 1 playing
+    # RMAC only: 1 if the video counters came up with hc[10] != VC & 1
+    # (LockVi, src/main.s), so VI was moved to the other parity.
+    ('VI_FLIP', 2),
     # 36.0036 Hz game time.  ONE WRITER EACH: the video interrupt advances
     # TICK_ACC and GAME_TICKS, the main loop advances GAME_DONE; the ticks
     # still to run are the difference.
@@ -84,8 +94,13 @@ HAL_CELLS = [
     ('DEMO_RUNS', 4),            # completed runs that matched to the end
     # The GPU road launch (csrc/game_main.c writes GPU_CMD, the GPU GPU_DONE;
     # the 68000 clears DONE only before a launch, when the GPU is stopped).
+    # GPU_CMD = 0 asks for the composers first; the GPU then leaves the
+    # second list's address there for the next launch (src/gpu_road.s).
     ('GPU_CMD', 4),
     ('GPU_DONE', 4),
+    # The frame buffer of frame ROAD_SEQ (C writes it just before ROAD_SEQ;
+    # RMAC's SetView reads both, on the same thread).
+    ('ROAD_VIEW', 4),
     # Rendered frames.  ROAD_SEQ: C only (frames finished; frame k is drawn
     # into VIEW(k&1)).  ROAD_SHOWN: RMAC only (the frame on screen).
     ('ROAD_SEQ', 4),
@@ -127,10 +142,23 @@ def dram_regions():
         # The road's span blocks, which the GPU reads: DRAM, not cartridge.
         ('TREKG_BUF', cart_blob_size('trekg.bin'), 64),
         # The viewport frame buffers (csrc/road.h VIEW_BYTES, checked there).
+        # THREE: the video interrupt arms the OP list from OBJ_SHADOW before
+        # SetView points it at the new frame, so a swap shows only from the
+        # NEXT interrupt.  With two buffers the next frame was drawn into the
+        # one still on screen (road flickering, session 2, hardware).
         ('VIEW0', GAME_BYTES, 64),
         ('VIEW1', GAME_BYTES, 64),
+        ('VIEW2', GAME_BYTES, 64),
         # The GPU command list: csrc/road.h ROAD_CMD_MAX longs, checked there.
         ('CMD_BUF', 0x2400, 8),
+        # The CHECK instrument's own list (keypad 9, csrc/game_main.c).
+        ('CMD_CHK', 0x2400, 8),
+        # The instruments' numbers, 320 x 76, copied into frames by the
+        # Blitter (csrc/game_main.c ovl_draw / ovl_blit).
+        ('OVL_BUF', 320 * 76, 64),
+        # The GPU composers' input (csrc/road.h CIN_*): position, colour
+        # quads, the grid rows of the frame as longs.
+        ('COMP_IN', COMP_IN_SIZE, 8),
     ]
 
 
@@ -266,6 +294,9 @@ def main():
         ('OBJ_N', len(OBJECTS), None),
         ('STACK_TOP', regs['STACK'][0] + regs['STACK'][1], None),
     ]
+    for k, v in CIN.items():
+        eq.append(('COMP_' + k, regs['COMP_IN'][0] + v, "GPU composers' input (csrc/road.h CIN_" + k + ")"))
+    eq.append(('COMP_ROWS', CIN_ROWS, None))
     for i, o in enumerate(OBJECTS):
         eq.append(('OBJ_' + o, i, 'index in the list'))
     eq += [(k, v, 'switch') for k, v in SWITCHES.items()]

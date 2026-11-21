@@ -53,27 +53,34 @@ void hud_number(uint8_t *view, const uint8_t *hud, int x, int y, uint32_t v, int
      * switch OFF over an LCD "8" the dashboard art already shows (fn_0fc6 /
      * fn_0eb5 / fn_41e5: 5 rows of 4, 1 and 2 = the two unlit tones, 0 =
      * leave the art).  So a digit is the 8's cells minus its stencil.
-     * No divisions in the loops: on the 68000 they made this instrument cost
-     * ~100 ms a frame (first try, 3-4 fps with it on). */
+     * No divisions and no multiplications in the loops: on the 68000 a
+     * 32-bit multiply is a library call, and with one per cell this
+     * instrument cost ~800 half-lines a frame (M3, hardware: 9 fps shown,
+     * with 4 ticks of catch-up per frame).  Row pointers instead. */
     static const uint8_t eight[20] = { 1,1,1,1, 1,0,0,1, 1,1,1,1, 1,0,0,1, 1,1,1,1 };
     const uint8_t *digits = seg(hud, HUD_N_SPEED + HUD_N_OXY + HUD_N_FUL);
-    int cw = 5 * scale, h = 5 * scale;
-    for (int j = -scale; j < h + scale; j++) {
-        uint8_t *row = view + (y + j) * 320 + x;
-        for (int i = -scale; i < n * cw; i++)
+    int cw = 5 * scale, h = 5 * scale, w = n * cw + scale;
+    int32_t band = (int32_t)(int16_t)(320 * scale);
+    uint8_t *org = view + (int32_t)(int16_t)y * 320 + x;
+    uint8_t *row = org - band - scale;
+    for (int j = -scale; j < h + scale; j++, row += 320)
+        for (int i = 0; i < w; i++)
             row[i] = bg;
-    }
-    for (int k = n - 1; k >= 0; k--, v /= 10) {
+    uint8_t *dig = org + (n - 1) * cw;
+    for (int k = n - 1; k >= 0; k--, v /= 10, dig -= cw) {
         const uint8_t *d = digits + 20 * (v % 10);
-        for (int r = 0; r < 5; r++)
-            for (int c = 0; c < 4; c++) {
+        uint8_t *crow = dig;
+        for (int r = 0; r < 5; r++, crow += band) {
+            uint8_t *cell = crow;
+            for (int c = 0; c < 4; c++, cell += scale) {
                 if (!eight[r * 4 + c] || d[r * 4 + c])
                     continue;
-                uint8_t *p = view + (y + r * scale) * 320 + x + k * cw + c * scale;
+                uint8_t *p = cell;
                 for (int sy = 0; sy < scale; sy++, p += 320)
                     for (int sx = 0; sx < scale; sx++)
                         p[sx] = fg;
             }
+        }
     }
 }
 

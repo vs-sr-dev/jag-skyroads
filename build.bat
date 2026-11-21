@@ -28,34 +28,41 @@ set "PATH=%MINGW%;%PATH%"
 
 if not exist build mkdir build
 
-echo [1/7] data conversion
+echo [1/8] data conversion
 "%PY%" tools\sr2jag.py %1
 if errorlevel 1 (echo CONVERSION ERROR & exit /b 1)
 
-echo [2/7] PC oracle: the attract demo through play.c
+echo [2/8] PC oracle: the attract demo through play.c
 gcc -std=c11 -O2 -Wall -Wextra -o build\demo_oracle.exe tools\oracle\demo_oracle.c csrc\port\play.c
 if errorlevel 1 (echo ORACLE BUILD ERROR & exit /b 1)
 build\demo_oracle.exe cart
 if errorlevel 1 (echo ORACLE: THE DEMO DOES NOT COMPLETE & exit /b 1)
 
-echo [3/7] memory map
+echo [3/8] memory map
 "%PY%" tools\memory_map.py
 if errorlevel 1 (echo MEMORY MAP ERROR & exit /b 1)
 
-echo [4/7] ambiguous expressions (RMAC has no precedence)
+echo [4/8] ambiguous expressions (RMAC has no precedence)
 "%PY%" tools\check_expr.py
 if errorlevel 1 (echo EXPR ERROR & exit /b 1)
 
-echo [5/7] RMAC
+echo [5/8] RMAC
 "%RMAC%" -fr -i%JAGINC%\ -iinclude\ -lbuild\main.lst -o build\main.bin src\main.s
 if errorlevel 1 (echo ASSEMBLER ERROR & exit /b 1)
 
+rem The GPU's composers against road_compose, the C they transcribe: the real
+rem binary in a JRISC interpreter, every 37th position of every road (all the
+rem phases, a few seconds).  tools\oracle\gpu_check.py 1 = every position.
+echo [6/8] GPU composers vs road_compose
+"%PY%" tools\oracle\gpu_check.py 37
+if errorlevel 1 (echo GPU COMPOSERS DIFFER & exit /b 1)
+
 rem The command goes to the image as ONE string, or it exits 0 doing nothing.
-echo [6/7] C blob (m68k-elf-gcc in Docker)
+echo [7/8] C blob (m68k-elf-gcc in Docker)
 docker run --rm -v "%CD%:/work" -w /work/csrc marsdev-32x:latest "sh build_engine.sh"
 if errorlevel 1 (echo C BLOB ERROR & exit /b 1)
 
-echo [7/7] cartridge
+echo [8/8] cartridge
 "%PY%" tools\cart_build.py
 if errorlevel 1 (echo PACK ERROR & exit /b 1)
 

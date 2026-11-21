@@ -95,14 +95,19 @@ def png(name, w, h, pixels, clut):
 #                   is its mirror around x=160: x = 320 - x0 - length
 # The record CHAINS of the original (a composer draws "the next record" by
 # calling the fill again) become consecutive indices, and the directory holds
-# record indices instead of byte offsets.  The 68000 needs the colour too.
+# record indices instead of byte offsets.
 #
-# trekg.bin:  8 x u32 object offsets, then per object
-#     +0  u32 records   +4 u32 colours offset   +8 u32 span-block offsets offset
-#     +12 u16 dir[13 rows][4 columns][6 kinds]  (record indices)
-#     colours: u8 per record;  offsets: u32 per record, relative to the BLOB
-#     start;  then the span blocks.
-# All offsets are relative to the blob start so the 68000 adds one base.
+# trekg.bin:  8 x u32 object offsets, then per object, LONGS ONLY, because
+# the GPU runs the composers too (src/gpu_road.s):
+#     +0  u32 records
+#     +4  u32 offset of the record table, from the object
+#     +8  u32 dir[13 rows][4 columns][6 kinds]   (record indices)
+#     record table: u32 per record = colour << 24 | span block offset from the
+#         BLOB start.  A colour >= 74 is stored as 0: the composers index the
+#         74-entry colour-quad table with "colour < 74 ? colour : 0" (render.c),
+#         so both give quad 0 and the GPU needs no clamp.
+#     then the span blocks.
+# All span offsets are relative to the blob start so the reader adds one base.
 LAYER_ROWS = 106          # viewport rows 32..137, the only ones roads reach
 DIR_ENTRIES = 13 * 4 * 6
 
@@ -149,18 +154,18 @@ def trek_gpu(objs):
         base = len(blob)
         struct.pack_into('>I', blob, 4 * k, base)
         n = len(order)
-        hdr = 12 + 2 * DIR_ENTRIES
-        col_ofs = hdr
-        off_ofs = col_ofs + n + (-(col_ofs + n) % 4)
-        spans_at = off_ofs + 4 * n
+        rec_ofs = 8 + 4 * DIR_ENTRIES
+        spans_at = rec_ofs + 4 * n
         obj = bytearray(spans_at)
-        struct.pack_into('>III', obj, 0, n, col_ofs, off_ofs)
-        struct.pack_into(f'>{DIR_ENTRIES}H', obj, 12, *dir_idx)
+        struct.pack_into('>II', obj, 0, n, rec_ofs)
+        struct.pack_into(f'>{DIR_ENTRIES}I', obj, 8, *dir_idx)
         body = bytearray()
         for i, ofs in enumerate(order):
             colour, y_rel, spans = recs[ofs]
-            obj[col_ofs + i] = colour
-            struct.pack_into('>I', obj, off_ofs + 4 * i, base + spans_at + len(body))
+            at = base + spans_at + len(body)
+            if at >> 24:
+                raise SystemExit(f"TREKDAT object {k}: span block at {at:#x} does not fit 24 bits")
+            struct.pack_into('>I', obj, rec_ofs + 4 * i, ((colour if colour < 74 else 0) << 24) | at)
             body += struct.pack('>II', max(y_rel, 0) * 320, len(spans))
             for x0, ln in spans:
                 body += struct.pack('>I', (x0 << 16) | ln)

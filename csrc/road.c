@@ -5,9 +5,8 @@
 typedef struct {
     const road_ctx *c;
     const uint8_t *obj;       /* phase object in trekg */
-    const uint8_t *col;       /* its record colours */
-    const uint8_t *offs;      /* its span-block offsets, u32 BE */
-    const uint8_t *dir;       /* u16 BE record indices */
+    const uint8_t *recs;      /* its records: colour << 24 | span block */
+    const uint8_t *dir;       /* u32 BE record indices */
     uint32_t *out;
     int n;
     int cur;                  /* record cursor (the original's si) */
@@ -19,17 +18,17 @@ typedef struct {
 
 static void seek_kind(comp *k, int kind)
 {
-    k->cur = get16(k->dir + 2 * (k->dircell + kind));
+    k->cur = (int)get32(k->dir + 4 * (k->dircell + kind));
 }
 
 /* 0x3137 / 0x3174: one record, colour patched if override != 0. */
 static void fill(comp *k, int override)
 {
-    int r = k->cur++;
-    int col = override ? override : k->col[r];
+    uint32_t rec = get32(k->recs + 4 * k->cur++);
+    int col = override ? override : (int)(rec >> 24);
     const uint8_t *q = k->c->tables + TAB_QUAD + 4 * (col < 74 ? col : 0);
     uint32_t fillb = q[k->half];
-    k->out[k->n++] = k->c->trekg_at + get32(k->offs + 4 * r);
+    k->out[k->n++] = k->c->trekg_at + (rec & 0xFFFFFFu);
     k->out[k->n++] = fillb | ((uint32_t)k->half << 8);
 }
 
@@ -205,9 +204,8 @@ void road_compose(road_ctx *c, const sr_play *p)
     uint32_t road_base = c->view + ROAD_Y0 * 320;
     k.c = c;
     k.obj = c->trekg + get32(c->trekg + 4 * (pos & 7));
-    k.col = k.obj + get32(k.obj + 4);
-    k.offs = k.obj + get32(k.obj + 8);
-    k.dir = k.obj + 12;
+    k.recs = k.obj + get32(k.obj + 4);
+    k.dir = k.obj + 8;
     k.out = c->cmd;
     k.n = 0;
     k.cur = 0;
@@ -231,6 +229,38 @@ void road_compose(road_ctx *c, const sr_play *p)
         }
     }
     emit(&k, ROAD_OP_END, 0);
+}
+
+/* ---- the GPU's input (road.h, CIN_*) ------------------------------------ */
+
+#if defined(__m68k__)
+static inline void st32(uint8_t *b, uint32_t v) { *(uint32_t *)(void *)b = v; }
+#else
+static inline void st32(uint8_t *b, uint32_t v) { put32(b, v); }
+#endif
+
+void road_gpu_quads(uint8_t *cin, const uint8_t *tables)
+{
+    for (int i = 0; i < 74; i++) {
+        st32(cin + CIN_QUAD0 + 4 * i, tables[TAB_QUAD + 4 * i]);
+        st32(cin + CIN_QUAD1 + 4 * i, tables[TAB_QUAD + 4 * i + 1]);
+    }
+}
+
+void road_gpu_input(uint8_t *cin, const sr_play *p, uint32_t view)
+{
+    uint16_t pos = (uint16_t)(p->z / 0x2000);
+    st32(cin + CIN_POS, pos);
+    st32(cin + CIN_BASE, view + ROAD_Y0 * 320);
+    int g = (pos >> 3) - 3;
+    uint8_t *w = cin + CIN_WIN;
+    for (int r = 0; r < CIN_ROWS; r++, g++) {
+        int in = g >= 0 && g < SR_GRID_ROWS;
+        for (int i = 0; i < 7; i++, w += 4)
+            st32(w, in ? p->road->cells[g * 7 + i] : 0);
+        st32(w, 0);
+        w += 4;
+    }
 }
 
 /* ---- the shadow (render.c draw_shadow / support, fn_0b71) --------------- */

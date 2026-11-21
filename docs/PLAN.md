@@ -41,15 +41,16 @@ ROMs (`build/`) are git-ignored.
 | work | where | why |
 |---|---|---|
 | game logic, physics, input, menus | 68000 (C blob, from skyroads-port) | integer code, 36 Hz, cheap |
-| road geometry: which records to draw (composers) | 68000 | ~80 tiles x a few tests per tick |
-| road rasterisation: span fills, ship shadow | **GPU** | the only per-pixel work in the game |
+| road geometry: which records to draw (composers) | **GPU** (since session 2; the C stays as the reference) | ~80 tiles, ~6,400 GPU instructions a frame |
+| road rasterisation: span fills | **GPU** | the only per-pixel work in the game |
 | backdrop, road layers, ship, dashboard | **Object Processor** | layers instead of repainting |
 | layer clears | Blitter | one large fill per layer per frame |
 | SFX, music (OPL2 synthesis), engine hum | **DSP** | the hum follows the speed: it has to be synthesised live |
 
 ### The screen
 
-The viewport is ONE 320x138 8-bit frame buffer, double-buffered, composed in
+The viewport is ONE 320x138 8-bit frame buffer, triple-buffered (see the
+lessons), composed in
 the original's painter's order: GPU (backdrop copy + records before the ship),
 68000 (ship, shadow), GPU (records after the ship). The OP shows it and the
 dashboard over it (transparent band on rows 129..137, opaque below).
@@ -103,10 +104,45 @@ A new frame is rendered once per tick.
 | gauges (68000) | 450-480 | 45-83 |
 
 "Sensibly better, already feels like the DOS version" (user), with drops in
-heavy scenes. The 68000 is the limit. Next, in order: the composers on the
-GPU (the largest cost; JRISC reads the same trekg data), ship + shadow on
-the GPU (aligned-long read-modify-write), then the hot 32-bit divisions in
-play.c rewritten equivalently - guarded by the tick-for-tick demo check.
+heavy scenes. The 68000 is the limit.
+
+### M3, session 2: the composers on the GPU
+
+- **The composers run on the GPU** (`src/gpu_road.s`, `gc_*`), a call-for-call
+  transcription of `road_compose`, which stays in C as the reference. Each
+  frame the 68000 writes a small input block (`COMP_IN`: position, frame base,
+  the colour quads split per half, the 11 grid rows a frame looks at as
+  longs); the first launch composes the whole list, waits for the Blitter
+  and fills list 1; it leaves list 2's address in `GPU_CMD` for the second.
+  `trekg.bin` became longs only (directory as u32, records as
+  `colour << 24 | span block`).
+- **Spans are filled with long stores** (bytes to the boundary, longs, bytes).
+- **Checks.** `tools/oracle/gpu_check.py` runs the REAL GPU binary (from
+  `build/main.bin`) in a JRISC interpreter (`tools/oracle/jrisc.py`, from
+  Prowl) on a DRAM image: lists against `road_compose`, and on a sample the
+  pixels of both launches against `raster.h`. Every position of every road
+  (37,295 frames) matched; `build.bat` runs every 37th (all phases, ~9 s).
+  The interpreter makes `movei` change the flags, as the real TOM was seen
+  to, so code that relies on flags across a `movei` fails on the PC too. A
+  deliberate mutation (`cmpq #4` -> `#3`) is caught. On hardware, keypad `9`
+  recomposes every frame on the 68000 and compares: 400+ frames, 0 different.
+- **Result: 19-26 fps** shown on hardware (was 8-11). Part of the old figure
+  was the instrument itself: its digits cost ~800 half-lines a frame (a
+  32-bit multiply per cell is a libgcc call on the 68000), uncounted by any
+  phase, and the slower frames then ran 4 ticks of catch-up each. The
+  numbers are now drawn once a second into `OVL_BUF` and the Blitter copies
+  them into every frame.
+- Measured with the GPU composers, before the long stores and the cheap
+  overlay (so ticks inflated): input+pose ~120, GPU 1 212-239, ship+shadow
+  301-317, GPU 2 106-245, gauges 42-46.
+
+- **Three frame buffers** (`ROAD_VIEW` tells SetView which): with two,
+  the frame being drawn was the one still on screen (see the lessons).
+
+Next, in order: ship + shadow on the GPU (~300 half-lines on the 68000;
+aligned-long read-modify-write), the ~120 half-lines of input + ship pose
+(divisions in `ship_pose` / `sr_in_tunnel`), then the hot 32-bit divisions
+in play.c rewritten equivalently - guarded by the tick-for-tick demo check.
 - **M4 — sound.** SFX through the DSP PCM driver (Keen Dreams, verified on
   hardware), resampled at build time to the I2S rate. Music: **an OPL2
   synthesised on the DSP** (9 channels x 2 operators = 18 FM operators),
@@ -154,5 +190,25 @@ constants inside `play.c` stay where the reimplementation put them.
 - The dashboard is transparent only over the viewport (rows 129..137); below,
   its zero pixels show palette entry 0. One transparent object let the BG
   register through (M1, hardware): two objects over the same pixels.
+- A swap of frame buffers takes effect one video interrupt LATE: the
+  interrupt arms the OP list from OBJ_SHADOW, and SetView updates the shadow
+  after it. With two buffers the next frame was drawn into the one still on
+  screen; it showed once frames got fast (road flickering on jumps, session
+  2, hardware). Three buffers.
+- **The video interrupt can be lost to where the code sits** (session 2,
+  hardware). It fires on VC == VI and HC == HDE (bit 10 set), so only if
+  hc[10] == VC & 1 holds for an odd VI; InitVideoTiming writes HC = VC = 0
+  to lock that, but HC and VC are clocked by vclk (vxclk) and a 68000 write
+  can miss the load depending on the cycle it lands on. A 12-byte shift of
+  main.s (nothing else changed: the triple-buffering SetView was 12 bytes
+  shorter) left the machine on COL_LOOP for ever; bisected with nop padding
+  on hardware down to InitVideoTiming / VideoOnMinimal, 8-byte shifts were
+  harmless. Fix: `LockVi` reads VC, HC, VC after the video is on and puts VI
+  on the parity the counters actually have (VI_FLIP = 1: yellow margins for
+  2 s at boot). Verified: the bad alignment re-created on purpose boots, with
+  yellow margins. Keen Dreams, Chess and Prowl share the hazard.
+- An instrument that draws every frame must be measured too: the timing
+  digits cost more than the phases they showed (session 2). Draw once, copy
+  with the Blitter.
 - BigPEmu's frame-event script did not run here (no frame ever reached); the
   hardware, with the BG-register stage colours, was the faster instrument.

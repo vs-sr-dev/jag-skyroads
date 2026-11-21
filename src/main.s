@@ -121,6 +121,7 @@ COL_BAD_B       EQU     $6000
 ;   COL_GPU_A  $FFC0  magenta    COL_GPU_B  $7BC0  dark magenta
 COL_GPU_A       EQU     $FFC0
 COL_GPU_B       EQU     $7BC0
+COL_VIFLIP      EQU     $F83F                   ; yellow: LockVi moved VI
 
 ;---------------------------------------------------------------------------
 ; Game time: 36.0036 Hz (PIT divisor 6628, 2 phases of 10: FORMATS.md sec.9)
@@ -218,6 +219,7 @@ Start:
     bsr     InitVectors
     bsr     InitVideoTiming
     bsr     VideoOnMinimal
+    bsr     LockVi
     move.l  #BM_VIDEO, BOOT_MARK
 
 ; Palette, world and dashboard are the C side's, per road (road_start in
@@ -318,11 +320,7 @@ SetView:
     move.l  ROAD_SEQ, d6
     move.l  d6, ROAD_SHOWN
     lea     OBJ_SHADOW+(OBJ_GAME*OBJ_STRIDE), a0
-    move.l  #VIEW0, d0
-    btst    #0, d6
-    beq.s   .sv_buf
-    move.l  #VIEW1, d0
-.sv_buf:
+    move.l  ROAD_VIEW, d0                   ; C picks among VIEW0..2
     moveq   #0, d1
     move.w  VDB_VAL, d1
     add.l   #(GAME_Y*2), d1
@@ -346,6 +344,13 @@ SetView:
 ;                          never went idle (BLIT_STALL), above all else
 ;   black                  playing (GAME_MODE = 1): the demo check is off
 BgProbe:
+    tst.w   VI_FLIP                         ; LockVi's evidence, 2 s at boot
+    beq.s   .bp_run
+    cmpi.l  #120, IRQ_TICK
+    bhs.s   .bp_run
+    move.w  #COL_VIFLIP, BG
+    rts
+.bp_run:
     moveq   #0, d0
     moveq   #0, d1
     tst.w   GAME_MODE
@@ -607,6 +612,45 @@ VideoOnMinimal:
     move.l  d0, OLP
     move.w  #COL_BOOT, BG
     move.w  #VIDEN|BGEN|PWIDTH4|RGB16|CSYNC, VMODE
+    rts
+
+;---------------------------------------------------------------------------
+; LockVi: VI on the parity the counters ACTUALLY came up with.
+; The video interrupt fires on VC == VI and HC == HDE at once, and HDE has
+; bit 10 set: only on half-lines where hc[10] = 1 (Keen Dreams, from TOM's
+; netlist).  InitVideoTiming writes HC = VC = 0 with the video off to lock
+; hc[10] == VC & 1, which makes an ODD VI fire.  But HC and VC are clocked by
+; vclk (vxclk) and the 68000's write strobe comes from the system clock: a
+; load can be missed, depending on the cycle it lands on, i.e. on where the
+; code happens to sit.  Session 2, hardware: a 12-byte shift of main.s left
+; the machine on COL_LOOP for ever (no interrupt), an 8-byte one did not;
+; bisected down to InitVideoTiming / VideoOnMinimal.
+; So, with the video running: read VC, HC, VC (equal VCs = a coherent pair),
+; and if hc[10] != VC & 1, put VI on the EVEN half-line after VDE instead
+; (still in the blanking), and say so in VI_FLIP.
+;---------------------------------------------------------------------------
+LockVi:
+    movem.l d0-d2, -(sp)
+.lv_read:
+    move.w  VC, d0
+    move.w  HC, d1
+    move.w  VC, d2
+    cmp.w   d0, d2
+    bne.s   .lv_read
+    lsr.w   #8, d1
+    lsr.w   #2, d1                          ; hc[10]
+    eor.w   d2, d1
+    andi.w  #1, d1                          ; 1: hc[10] != VC & 1
+    move.w  d1, VI_FLIP
+    beq.s   .lv_done
+    move.w  VDE_VAL, d0
+    addq.w  #1, d0
+    ori.w   #1, d0                          ; the odd VI InitVideoTiming chose
+    addq.w  #1, d0                          ; the next, even, half-line
+    move.w  d0, VI
+    move.w  d0, VI_VAL
+.lv_done:
+    movem.l (sp)+, d0-d2
     rts
 
 ;---------------------------------------------------------------------------
