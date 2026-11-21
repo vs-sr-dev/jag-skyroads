@@ -1,0 +1,60 @@
+"""Jaguar cartridge boot header ($F6 fastboot stub) + composition.
+
+Pulled out of pad_rom.py so the V6 packer can reuse it.  The algorithm is
+tursilion/makefastboot's (BSD, see tools/_makefastboot_ref.cpp), which however
+stops at 4 MB: this one goes up to 6 MB.
+
+The first $400 bytes are taken verbatim from `64BitDemo.rom` (a working 6 MB
+cart, Quadrunner 2020): they hold the $F6 loader plus a second encrypted block
+that the BIOS check needs on carts beyond 4 MB.
+"""
+import struct
+
+HEADER_TEMPLATE = bytes.fromhex(
+    "F642233C0DAC1D8DB0237153BE8711179827042622C1BE1F7930DB90C6C813F8"
+    "0941997851CBFF8CF97F75F06B0EFE132D84D821E591D4013F235E13AEF22FEF"
+    "6C09D8069F39278F6D4F03D3D9843DEAABB748F1E6985127F06E940E9092C8F4"
+    "503B46580823E04BD23C1CC5306B1124FAC67829D1535A64E0915A16ECD987C4"
+    "D82D16986A852901F725FBF6F9C10F38A7B39B1EC619691E6B050177D0CD09F0"
+    "A70FAA7624922628EF72E486413B83223C074F670BB6275F7CD7EC52F6BF44EE"
+    "9C6B330A36BE4CEB3E34E43AFDF67587B1EDF651720699281071D7447EDE0F96"
+    "F38401FF597133B218554E56434CA6E972E24A9F049A87F17392863E8007551C"
+    "CE5776D31CC943827DCF19496EFB19607472D690378178FB10017EE55CB78188"
+    "E2EB07A275103511CBE92E7539793E76B8F85A88FF6C7707BDCE05F6D229035F"
+    "BE0451D8F71507F9BED912273DE0F2C0202FBFA6BA766B698F0541014D9EF079"
+    "87AF8CDBFB30E3C951292A3E913AE052EE45E6795A3D9212121F6C62A29B99AC"
+    "D832F3F4CF4A09565A0D7684E15AFF2369D203E62E47C65409A3476E5B5AA1E8"
+    "25C5A56164B882C8171A8AC81DEC49941E00A0233935F3B2A7544790CB524078"
+    "A33388EB230A291BC7B7E210759F275BE300636F1255200B44B267EF741517BB"
+    "7BB79578C0FE2C99DDFFDCFC43AF42C2278A539E620B128ED35E760F2B9D6D8D"
+    "2844A0B4B122A89D2C019004AB0D602960D74902249E101DE61C58C9FC149792"
+    "231E74DE23AFA7B6DB5278DA5E6C166B3617BC017F6A55A77DC060FD50727862"
+    "14FD06F70F1E82CCFB0B6206781D800B55AEC925616588DB230E0DFBD93B4133"
+    "85C89F61BCC91722294E41CAA54FDF7BF0B7C3A493B2F2E74D3B462122D9509F"
+    "2E7F2BA3D2A12468E4BF28FF"
+)
+HEADER_TEMPLATE = (HEADER_TEMPLATE + b"\xFF" * 0x400)[:0x400]
+assert len(HEADER_TEMPLATE) == 0x400
+
+# Width in bits 0-2 (4 = 32 bit), speed in bits 3-4 (0 = 10 clocks, 8 = 8,
+# 16 = 6, 24 = 5).  This stays on the conservative 32 bit / 10 clock pairing,
+# the one commercial carts were tested with.
+#
+# Tried in S29: raising it to 0x1C (5 clocks) does NOT move a single tick of
+# the load times under BigPEmu, which therefore ignores it.  That says two
+# things: the slowness measured there does not come from cartridge wait
+# states, and on real hardware the comparison is still to be made.
+CART_CONFIG = 0x04
+
+
+def write_boot_header(cart, entry_point):
+    """Writes the first $410 bytes of the image (cart = bytearray, in place).
+
+    The $F6 stub does not use the checksum at $410-$41B: leaving it at $FF
+    saves summing 1.5 million words at every boot.
+    """
+    cart[0:0x400] = HEADER_TEMPLATE
+    for i in range(4):
+        cart[0x400 + i] = CART_CONFIG
+    struct.pack_into(">I", cart, 0x404, entry_point)
+    struct.pack_into(">I", cart, 0x408, 0)
