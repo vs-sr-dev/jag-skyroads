@@ -15,6 +15,11 @@ ROMs (`build/`) are git-ignored.
   the specification we work from. Its gameplay core (`play.c`, `tables.c`) is
   integer-only C with no allocation, and is meant to be compiled for the 68000
   as is, with its licence notice kept.
+  We use it as a FROZEN reference: github.com/ammaarreshi/skyroads-port at
+  commit d865dfe1 (June 2026; no activity since, open PRs unanswered).
+  Discrepancies found against the original binary are fixed and documented
+  HERE, not waited for upstream (the shadow stencils: its open PR #2 has the
+  same fix).
 - **Jaguar-KeenDreams** and **Prowl**: the hardware sequences (boot, video
   timing, OP list, interrupt, DSP audio, GameDrive USB) are copied from there,
   never re-derived. They are verified on the user's NTSC Jaguar.
