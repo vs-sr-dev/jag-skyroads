@@ -78,8 +78,30 @@ A new frame is rendered once per tick.
   320x138 frame buffer plus the dashboard. Offline, the whole frame matches
   skyroads-port's renderer pixel for pixel on all 1775 demo ticks, except
   the shadow, where the port is wrong (below).
-- **M3 — playable.** Pad input, all 30 roads, death/explosion, road complete,
-  dashboard gauges (fuel, oxygen, speed, gravity, jump-o-master).
+- **M3 — DONE on hardware (session 1).** Pad (Keen Dreams' ReadPad), the 30
+  roads in sequence, death and retry, road completed, every gauge; keypad
+  `*`/`#` step roads (test instrument), `0` shows frame timings. The whole
+  screen is one 320x200 frame buffer: Blitter (pristine viewport) -> GPU
+  (records before the ship) -> 68000 (ship, shadow) -> GPU (records after)
+  -> 68000 (gauges, incremental). Offline: equal to skyroads-port's renderer
+  + HUD on the demo and on synthetic sweeps of all 31 roads (35,840 frames).
+
+### Performance (M3, measured on hardware, half-lines of 31.8 us per frame)
+
+| phase | first | after Blitter + incremental HUD + no per-pixel mulsi3 |
+|---|---|---|
+| physics, per tick | ~70 | ~220 (catch-up inflated) |
+| composers (68000) | 500-800 | 620-700 |
+| GPU 1 | 650-760 | 150-230 |
+| ship + shadow (68000) | 320-430 | 230-250 |
+| GPU 2 | 20-190 | 120-390 |
+| gauges (68000) | 450-480 | 45-83 |
+
+"Sensibly better, already feels like the DOS version" (user), with drops in
+heavy scenes. The 68000 is the limit. Next, in order: the composers on the
+GPU (the largest cost; JRISC reads the same trekg data), ship + shadow on
+the GPU (aligned-long read-modify-write), then the hot 32-bit divisions in
+play.c rewritten equivalently - guarded by the tick-for-tick demo check.
 - **M4 — sound.** SFX through the DSP PCM driver (Keen Dreams); music as OPL2
   synthesised on the DSP; the engine hum.
 - **M5 — the rest of the game.** Intro animation, menus, road selection,
@@ -103,6 +125,13 @@ constants inside `play.c` stay where the reimplementation put them.
   vertical bars instead of a shadow. Seen on hardware by the user; the offline
   check could not see it because it compares WITH the port.
 - At most two full-width 8-bit objects per line on the OP (see "The screen").
+- The GRAV-O-METER stencils (ds:0x13c) are not glyphs: they are the cells to
+  switch OFF over an LCD "8" already in the dashboard art (fn_0fc6, fn_0eb5,
+  fn_41e5 disassembled). skyroads-port draws them right.
+- On the 68000, `y * 320` with 32-bit ints is a libgcc call per pixel; walk
+  row pointers. Instruments drawn on screen must show latched averages
+  (numbers changing 36 times a second cannot be read off a TV) and cost
+  little themselves (the first version cost ~100 ms a frame).
 
 - A false branch object falls through to the NEXT PHRASE, not to its link:
   the two head branches and the first object must be adjacent (M0, hardware).

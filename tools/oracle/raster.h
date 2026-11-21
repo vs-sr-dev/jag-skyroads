@@ -2,10 +2,9 @@
  *
  * raster_run:   executes ONE road command list (csrc/road.h) with the exact
  *               semantics src/gpu_road.s implements;
- * render_view:  the whole frame buffer as the Jaguar builds it - GPU list 1,
- *               ship and shadow on the CPU, GPU list 2;
- * compose_frame: the OP's picture - the view, then the dashboard (top band
- *               transparent over rows 129..137, the rest opaque).
+ * render_view:  the whole 320x200 frame as the Jaguar builds it - the
+ *               Blitter's viewport copy, GPU list 1, ship and shadow on the
+ *               CPU, GPU list 2, gauges incrementally on the CPU.
  *
  * Host addresses: commands carry 32-bit "GPU addresses"; here the trekg blob
  * is mapped at HOST_TREKG, the frame buffer at HOST_VIEW and the backdrop
@@ -15,14 +14,14 @@
 #define RASTER_H
 
 #include <string.h>
-#include "../../csrc/road.h"
+#include "../../csrc/hud.h"
 
 #define HOST_VIEW     0x00010000u
-#define HOST_BACKDROP 0x00020000u
+#define HOST_PRISTINE 0x00020000u
 #define HOST_TREKG    0x00100000u
 
 static inline void raster_run(const uint32_t *cmd, const uint8_t *trekg,
-                              uint8_t *view, const uint8_t *backdrop)
+                              uint8_t *view, const uint8_t *pristine)
 {
     uint8_t *base = NULL;
     for (;;) {
@@ -34,7 +33,7 @@ static inline void raster_run(const uint32_t *cmd, const uint8_t *trekg,
             continue;
         }
         if (a == ROAD_OP_COPY) {
-            memcpy(base, backdrop + (b - HOST_BACKDROP), VIEW_BYTES);
+            memcpy(base, pristine + (b - HOST_PRISTINE), VIEW_BYTES);
             continue;
         }
         const uint8_t *blk = trekg + (a - HOST_TREKG);
@@ -51,28 +50,16 @@ static inline void raster_run(const uint32_t *cmd, const uint8_t *trekg,
 }
 
 static inline void render_view(road_ctx *c, const sr_play *p, uint8_t *view,
-                               const uint8_t *backdrop, const uint8_t *cars,
-                               ship_pose_t s)
+                               const uint8_t *pristine, const uint8_t *cars,
+                               const uint8_t *hud, ship_pose_t s, hud_state *st)
 {
+    memcpy(view, pristine, VIEW_COPY_BYTES);          /* the Blitter's copy */
     road_compose(c, p);
-    raster_run(c->cmd, c->trekg, view, backdrop);
+    raster_run(c->cmd, c->trekg, view, pristine);
     road_ship(c, view, cars, s);
     road_shadow(c, view, p, s);
-    raster_run(c->cmd + c->second, c->trekg, view, backdrop);
-}
-
-/* view: 320x138; dash: 320x71 from row 129. */
-static inline void compose_frame(uint8_t *fb, const uint8_t *view, const uint8_t *dash)
-{
-    memset(fb, 0, 320 * 200);
-    memcpy(fb, view, VIEW_BYTES);
-    for (int y = 0; y < 71; y++)
-        for (int x = 0; x < 320; x++) {
-            uint8_t p = dash[y * 320 + x];
-            int sy = 129 + y;
-            if (p || sy >= 138)
-                fb[sy * 320 + x] = p;
-        }
+    raster_run(c->cmd + c->second, c->trekg, view, pristine);
+    hud_update(view, pristine, hud, p, st);
 }
 
 #endif

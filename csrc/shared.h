@@ -76,8 +76,17 @@ static inline void demo_rec(uint8_t *b, const sr_play *p, int res, ship_pose_t s
     put16(b + 30, (uint16_t)s.top);
 }
 
+/* Big-endian reads of the cartridge blobs.  On the 68000 they ARE native
+ * loads (every field is aligned to its size by tools/sr2jag.py); assembling
+ * them byte by byte there cost the composers most of their time (M3,
+ * measured on hardware).  The PC keeps the portable version. */
+#if defined(__m68k__)
+static inline uint16_t get16(const uint8_t *b) { return *(const uint16_t *)(const void *)b; }
+static inline uint32_t get32(const uint8_t *b) { return *(const uint32_t *)(const void *)b; }
+#else
 static inline uint16_t get16(const uint8_t *b) { return (uint16_t)((b[0] << 8) | b[1]); }
 static inline uint32_t get32(const uint8_t *b) { return ((uint32_t)get16(b) << 16) | get16(b + 2); }
+#endif
 
 /* A road out of roads.bin (tools/sr2jag.py): an index of 16-byte entries
  * {u32 offset, u16 rows, u16 gravity, u16 word2, u16 word3, u32 0}, then the

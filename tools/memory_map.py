@@ -18,6 +18,7 @@ Cartridge regions follow the REAL sizes of the converted blobs in cart/, so this
 runs after tools/sr2jag.py.
 """
 import os
+import re
 import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -47,6 +48,7 @@ VIEW_H = 138                     # the 3D viewport (rows 0..137)
 DASH_Y = 129                     # the dashboard picture starts here
 DASH_H = 71
 
+GAME_BYTES = 320 * 200
 WORLD_BYTES = 320 * 138
 DASH_BYTES = 320 * 71
 CAR_BYTES = 32 * 24
@@ -64,9 +66,11 @@ HAL_CELLS = [
     ('TICK_HZ', 2),
     ('CUR_ROAD', 2),             # which road's CLUT/world is shown
     ('CUR_WORLD', 2),
-    ('PAD_STATE', 4),
-    ('PAD_PREV', 4),
-    ('PAD_EDGE', 4),
+    # The pad, read by RMAC (ReadPad) every video frame: RMAC only.  The C
+    # side keeps its own previous state for edges.
+    ('PAD_STATE', 2),            # game buttons, PAD_B_* bits
+    ('PAD_KEYS', 2),             # keypad, KEY_B_* bits (instruments only)
+    ('GAME_MODE', 2),            # C only: 0 attract demo, 1 playing
     # 36.0036 Hz game time.  ONE WRITER EACH: the video interrupt advances
     # TICK_ACC and GAME_TICKS, the main loop advances GAME_DONE; the ticks
     # still to run are the difference.
@@ -91,18 +95,11 @@ HAL_CELLS = [
 
 # --- OP objects, in LIST ORDER = priority (whoever is drawn last wins) -------
 OBJECTS = [
-    # The viewport, rows 0..137, opaque: ONE frame buffer the GPU and the
-    # 68000 compose (backdrop, road, ship, shadow).  Stacking road layers and
-    # the ship as objects put three full-width objects on a line, and that
-    # stopped the real Jaguar dead (M2, hardware).
-    'VIEW',
-    # The dashboard is TWO objects over the same pixels.  In the original its
-    # index-0 pixels are transparent only where they overlap the viewport
-    # (rows 129..137); below, the pristine screen holds 0 there and they show
-    # palette entry 0.  One transparent object let the BG register through
-    # (seen on hardware, M1).
-    'DASH_TOP',                  # rows 129..137, transparent
-    'DASH_BOT',                  # rows 138..199, opaque
+    # The whole 320x200 game screen, opaque: ONE frame buffer the GPU and the
+    # 68000 compose (pristine screen, road, ship, shadow, gauges; csrc/road.h).
+    # Stacking road layers and the ship as objects put three full-width
+    # objects on a line, and that stopped the real Jaguar dead (M2, hardware).
+    'GAME',
 ]
 
 # --- DRAM regions: (name, size, align). Laid out in this order. -------------
@@ -123,14 +120,15 @@ def dram_regions():
         # has already zeroed and the copy does not touch.
         ('DBLOB', ROM_CBLOB_SIZE, 8),
         ('CBSS', CBSS_SIZE, 8),
-        ('BACKDROP_BUF', WORLD_BYTES, 64),
-        ('DASH_BUF', DASH_BYTES, 64),
+        # The road's pristine screen (csrc/hud.c hud_pristine), the GPU's
+        # copy source at the start of every frame.
+        ('PRISTINE', GAME_BYTES, 64),
         ('CARS_BUF', CAR_BYTES * CAR_FRAMES, 64),
         # The road's span blocks, which the GPU reads: DRAM, not cartridge.
         ('TREKG_BUF', cart_blob_size('trekg.bin'), 64),
         # The viewport frame buffers (csrc/road.h VIEW_BYTES, checked there).
-        ('VIEW0', WORLD_BYTES, 64),
-        ('VIEW1', WORLD_BYTES, 64),
+        ('VIEW0', GAME_BYTES, 64),
+        ('VIEW1', GAME_BYTES, 64),
         # The GPU command list: csrc/road.h ROAD_CMD_MAX longs, checked there.
         ('CMD_BUF', 0x2400, 8),
     ]
@@ -145,6 +143,7 @@ CART_BLOBS = [
     ('ROM_ROADS', 'roads.bin'),
     ('ROM_TREKG', 'trekg.bin'),
     ('ROM_TABLES', 'tables.bin'),
+    ('ROM_HUD', 'hud.bin'),
     ('ROM_DEMO', 'demo.bin'),
     ('ROM_DEMOX', 'demo_expect.bin'),   # tools/oracle/demo_oracle.c
 ]
@@ -155,6 +154,33 @@ def cart_blob_size(fn):
     if not os.path.isfile(path):
         raise SystemExit(f"cart/{fn} missing: run tools/sr2jag.py first")
     return align(os.path.getsize(path), 32)
+
+
+JAGUAR_INC = r'D:\Homebrew\Jaguar\include\jaguar.inc'
+# Atari's names the C side needs, exported as JAG_<name>: read from
+# jaguar.inc itself, so there is no second, hand-written copy of them.
+JAG_NAMES = ['A1_BASE', 'A1_FLAGS', 'A1_CLIP', 'A1_PIXEL', 'A1_STEP',
+             'A2_BASE', 'A2_FLAGS', 'A2_PIXEL', 'A2_STEP', 'B_CMD', 'B_COUNT',
+             'SRCEN', 'UPDA1', 'UPDA2', 'LFU_REPLACE',
+             'PITCH1', 'PIXEL8', 'WID320', 'XADDPHR']
+
+
+def jaguar_inc():
+    vals = {}
+    for line in open(JAGUAR_INC, errors='replace'):
+        parts = line.split(';')[0].split()
+        if len(parts) >= 3 and parts[1].upper() == 'EQU':
+            expr = ' '.join(parts[2:]).replace('$', '0x')
+            for k, v in vals.items():
+                expr = re.sub(r'\b%s\b' % re.escape(k), str(v), expr)
+            try:
+                vals[parts[0]] = int(eval(expr, {'__builtins__': {}}))
+            except Exception:
+                pass
+    missing = [n for n in JAG_NAMES if n not in vals]
+    if missing:
+        raise SystemExit(f"jaguar.inc: cannot evaluate {missing}")
+    return {n: vals[n] for n in JAG_NAMES}
 
 
 def align(v, a):
@@ -243,13 +269,19 @@ def main():
     for i, o in enumerate(OBJECTS):
         eq.append(('OBJ_' + o, i, 'index in the list'))
     eq += [(k, v, 'switch') for k, v in SWITCHES.items()]
+    # Pad bits (Keen Dreams' ReadPad, verified on hardware): PAD_STATE / PAD_KEYS.
+    for i, n in enumerate(['UP', 'DOWN', 'LEFT', 'RIGHT', 'A', 'B', 'C', 'OPT', 'PAUSE']):
+        eq.append(('PAD_B_' + n, i, 'bit of PAD_STATE'))
+    for i in range(10):
+        eq.append((f'KEY_B_{i}', i, 'bit of PAD_KEYS'))
+    eq += [('KEY_B_STAR', 10, 'bit of PAD_KEYS'), ('KEY_B_HASH', 11, 'bit of PAD_KEYS')]
     eq += [('C_MAGIC', C_MAGIC, "c_init's answer"),
            ('C_ENTRY_INIT', regs['DBLOB'][0], 'C entry table: jmp c_init'),
            ('C_ENTRY_TICK', regs['DBLOB'][0] + 6, 'C entry table: jmp c_tick'),
            ('C_ENTRY_RENDER', regs['DBLOB'][0] + 12, 'C entry table: jmp c_render')]
     eq += [('SCR_W', SCR_W, None), ('SCR_H', SCR_H, None), ('GAME_H', GAME_H, None),
            ('GAME_Y', GAME_Y, None), ('VIEW_H', VIEW_H, None), ('DASH_Y', DASH_Y, None),
-           ('DASH_H', DASH_H, None), ('DASH_TOP_H', VIEW_H - DASH_Y, None), ('WORLD_BYTES', WORLD_BYTES, None),
+           ('DASH_H', DASH_H, None), ('GAME_BYTES', GAME_BYTES, None), ('WORLD_BYTES', WORLD_BYTES, None),
            ('WORLD_STRIDE', align(WORLD_BYTES, 8), None), ('DASH_BYTES', DASH_BYTES, None),
            ('CAR_BYTES', CAR_BYTES, None), ('CAR_FRAMES', CAR_FRAMES, None),
            ('CLUT_BYTES', 512, None), ('N_ROADS', 31, None), ('N_WORLDS', 10, None)]
@@ -269,6 +301,9 @@ def main():
         f.write(f'/* {hdr} */\n#ifndef MEM_MAP_H\n#define MEM_MAP_H\n\n')
         for n, v, c in eq:
             f.write(f'#define {n:<16} 0x{v:X}u\n')
+        f.write("\n/* From Atari's jaguar.inc. */\n")
+        for n, v in jaguar_inc().items():
+            f.write(f'#define JAG_{n:<16} 0x{v:X}u\n')
         f.write('\n#endif\n')
 
     with open(os.path.join(REPO, 'include', 'jag_c.ld'), 'w', newline='\n') as f:

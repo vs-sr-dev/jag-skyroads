@@ -188,7 +188,28 @@ def exe_tables(src):
         'shadow': exe[EXE_DS + 0x65E:EXE_DS + 0x65E + 5 * 261],
         # ds:0x44a: dashboard cowl half-width per viewport row (138 u16)
         'cowl': struct.unpack_from('<138H', exe, EXE_DS + 0x44A),
+        # ds:0x13c: GRAV-O-METER digits, 10 x (4 wide x 5 tall), row-major
+        'digits': exe[EXE_DS + 0x13C:EXE_DS + 0x13C + 10 * 20],
+        # ds:0x204: JUMP-O-MASTER lamp, off / on, 26 x 5 each
+        'aplight': exe[EXE_DS + 0x204:EXE_DS + 0x204 + 2 * 130],
     }
+
+
+def load_segments(src, name, count, table_end):
+    """FUL_DISP.DAT / OXY_DISP.DAT / SPEED.DAT (FORMATS.md 5-6): count u16
+    offsets relative to table_end, each record {u16 screen_ofs, u8 w, u8 h,
+    w*h cells of 0/1/2}.  Returns [(x, y, w, h, cells)]."""
+    d = src.read(name)
+    out = []
+    for i in range(count):
+        off = struct.unpack_from('<H', d, 2 * i)[0]
+        r = table_end + off
+        ofs, w, h = struct.unpack_from('<HBB', d, r)
+        cells = d[r + 4:r + 4 + w * h]
+        if len(cells) != w * h:
+            raise SystemExit(f"{name}: record {i} runs past the end of the file")
+        out.append((ofs % 320, ofs // 320, w, h, cells))
+    return out
 
 
 def vga_rgb8(c):

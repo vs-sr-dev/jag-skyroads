@@ -182,6 +182,33 @@ def tables_blob(t):
     return bytes(b)
 
 
+# hud.bin: the dashboard's moving parts (csrc/hud.c).
+#   56 x u32 offsets: 34 speed segments, 10 oxygen, 10 fuel, the digits, the
+#   jump-o-master lamps;  a segment record is u16 x, u16 y, u16 w, u16 h, then
+#   w*h cells (0 = not part of it, 1 / 2 = which colour), padded to 2.
+HUD_SPEED, HUD_OXY, HUD_FUL = 34, 10, 10
+
+
+def hud_blob(src, tabs):
+    segs = (sd.load_segments(src, 'SPEED.DAT', HUD_SPEED, 2 * HUD_SPEED)
+            + sd.load_segments(src, 'OXY_DISP.DAT', HUD_OXY, 2 * HUD_OXY)
+            + sd.load_segments(src, 'FUL_DISP.DAT', HUD_FUL, 2 * HUD_FUL))
+    n = len(segs) + 2
+    blob = bytearray(4 * n)
+    for i, (x, y, w, h, cells) in enumerate(segs):
+        if not (0 <= x and x + w <= 320 and 129 <= y and y + h <= 200):
+            raise SystemExit(f"HUD segment {i} at {x},{y} {w}x{h} is outside the dashboard")
+        struct.pack_into('>I', blob, 4 * i, len(blob))
+        blob += struct.pack('>HHHH', x, y, w, h) + cells
+        blob += bytes(len(blob) % 2)
+    blob += bytes(-len(blob) % 4)
+    struct.pack_into('>I', blob, 4 * len(segs), len(blob))
+    blob += tabs['digits']
+    struct.pack_into('>I', blob, 4 * (len(segs) + 1), len(blob))
+    blob += tabs['aplight']
+    return bytes(blob + bytes(-len(blob) % 8))
+
+
 def find_source(argv):
     if len(argv) > 1:
         return argv[1]
@@ -275,7 +302,9 @@ def main(argv):
     if len(objs) != 8:
         raise SystemExit(f"TREKDAT: {len(objs)} objects, expected 8")
     write('trekg.bin', trek_gpu(objs))
-    write('tables.bin', tables_blob(sd.exe_tables(src)))
+    tabs = sd.exe_tables(src)
+    write('tables.bin', tables_blob(tabs))
+    write('hud.bin', hud_blob(src, tabs))
 
     demo = src.read('DEMO.REC')
     write('demo.bin', pad8(struct.pack('>I', len(demo)) + demo))

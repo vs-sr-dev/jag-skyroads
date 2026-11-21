@@ -7,21 +7,25 @@
  * logic: the same records in the same order with the same colours.  What
  * changes is the output: instead of filling spans, they append commands.
  *
- * THE FRAME is ONE 320x138 8-bit buffer (the viewport), composed in the
- * original's order:
- *   1. GPU, first launch:  the pristine backdrop copied in, then every record
- *      the original draws BEFORE the ship;
+ * THE FRAME is ONE 320x200 8-bit buffer, the whole game screen, composed
+ * in the original's order:
+ *   0. Blitter:            the pristine viewport (rows 0..137 of the screen
+ *      hud_pristine builds at road start) copied in, one phrase-mode blit;
+ *   1. GPU, first launch:  every record the original draws BEFORE the ship;
  *   2. CPU:                the ship and its shadow (road_ship, road_shadow);
  *   3. GPU, second launch: the records drawn AFTER the ship (the ship row's
- *      "post-ship" set and the two nearer rows).
- * The OP shows the buffer and the dashboard over it.  (A first version
- * stacked two road layers and the ship as OP objects: three full-width
- * objects on a line stopped the real Jaguar dead - M2, hardware.)
+ *      "post-ship" set and the two nearer rows);
+ *   4. CPU:                the gauges, incrementally (hud_update).
+ * The OP shows the buffer as ONE object.  (A first version stacked road
+ * layers and the ship as OP objects: three full-width objects on a line
+ * stopped the real Jaguar dead - M2, hardware.)
  *
  * COMMANDS, two longs each, read by the GPU (src/gpu_road.s):
  *   (ROAD_OP_END,  0)        end of this launch's list
  *   (ROAD_OP_BASE, base)     following spans' row offsets count from base
  *   (ROAD_OP_COPY, src)      copy VIEW_BYTES from src to the current base
+ *                            (unused since the Blitter does it; kept in the
+ *                            GPU as a fallback)
  *   (address, fill | half<<8) one record: address of its span block in
  *                            trekg (tools/sr2jag.py), fill byte, mirrored
  *                            if half = 1
@@ -31,8 +35,13 @@
 
 #include "shared.h"
 
-#define VIEW_ROWS     138
+#define VIEW_ROWS     200
 #define VIEW_BYTES    (320 * VIEW_ROWS)
+/* What is restored from the pristine screen every frame: the viewport and
+ * the cowl band over it (rows 0..137).  The dashboard below persists in each
+ * frame buffer and is kept up to date by hud_update. */
+#define VIEW_COPY_ROWS  138
+#define VIEW_COPY_BYTES (320 * VIEW_COPY_ROWS)
 #define ROAD_Y0       32          /* span row offsets count from this row */
 
 #define ROAD_OP_END   0u
@@ -56,7 +65,7 @@ typedef struct {
     uint32_t trekg_at;        /* the blob's address as the GPU sees it */
     const uint8_t *tables;
     uint32_t view;            /* the frame buffer, GPU address */
-    uint32_t backdrop;        /* the pristine backdrop, GPU address */
+    uint32_t pristine;        /* the pristine screen, GPU address */
     uint32_t *cmd;            /* out: at least ROAD_CMD_MAX longs */
     int second;               /* out: index of the second launch's list */
 } road_ctx;

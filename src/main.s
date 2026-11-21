@@ -135,8 +135,6 @@ NTSC_VI_E4      EQU     600544
 PAL_VI_E4       EQU     500805
 MAX_CATCHUP     EQU     4
 
-; The attract demo runs on road 0 (game.c: world 0 for the demo).
-DEMO_ROAD       EQU     0
 
 
 ; Boot stages for BOOT_MARK.
@@ -222,13 +220,8 @@ Start:
     bsr     VideoOnMinimal
     move.l  #BM_VIDEO, BOOT_MARK
 
-    moveq   #DEMO_ROAD, d0                  ; the attract demo's road...
-    bsr     LoadClut
-    move.l  #BM_CLUT, BOOT_MARK
-
-    moveq   #0, d0                          ; ...and its world
-    bsr     LoadWorld
-    bsr     LoadDash
+; Palette, world and dashboard are the C side's, per road (road_start in
+; csrc/game_main.c): here only what never changes.
     bsr     LoadCars
     bsr     LoadTrek
     bsr     InitGpu
@@ -287,6 +280,7 @@ MainLoop:
 ; the furthest point from the next one: the handler never copies a
 ; half-written object.
     bsr     SetView
+    bsr     ReadPad
 
     move.l  GAME_TICKS, d6
     move.l  d6, d0
@@ -314,15 +308,16 @@ MainLoop:
     bra     MainLoop
 
 ;---------------------------------------------------------------------------
-; SetView: the viewport object on the frame buffer of frame ROAD_SEQ
-; (written by C when its frame is complete: backdrop, road, ship, shadow).
+; SetView: the game screen's object on the frame buffer of frame ROAD_SEQ
+; (written by C when its frame is complete: pristine screen, road, ship,
+; shadow, gauges).
 ; ROAD_SHOWN is this routine's own copy: one writer per cell.
 ;---------------------------------------------------------------------------
 SetView:
     movem.l d0-d7/a0, -(sp)
     move.l  ROAD_SEQ, d6
     move.l  d6, ROAD_SHOWN
-    lea     OBJ_SHADOW+(OBJ_VIEW*OBJ_STRIDE), a0
+    lea     OBJ_SHADOW+(OBJ_GAME*OBJ_STRIDE), a0
     move.l  #VIEW0, d0
     btst    #0, d6
     beq.s   .sv_buf
@@ -331,7 +326,7 @@ SetView:
     moveq   #0, d1
     move.w  VDB_VAL, d1
     add.l   #(GAME_Y*2), d1
-    move.l  #VIEW_H, d2
+    move.l  #GAME_H, d2
     moveq   #0, d3
     move.l  #GAME_IWIDTH, d4
     move.l  #GAME_IWIDTH, d5
@@ -347,8 +342,14 @@ SetView:
 ;   green / dark green     at least one whole run matched, tick for tick
 ;   red / dark red         a tick differed (DEMO_BAD = which, +1)
 ;---------------------------------------------------------------------------
-;   magenta / dark magenta the GPU missed a DONE (GPU_FAIL), above all else
+;   magenta / dark magenta the GPU missed a DONE (GPU_FAIL) or the Blitter
+;                          never went idle (BLIT_STALL), above all else
+;   black                  playing (GAME_MODE = 1): the demo check is off
 BgProbe:
+    moveq   #0, d0
+    moveq   #0, d1
+    tst.w   GAME_MODE
+    bne.s   .bp_gpu                         ; playing: black margins
     move.w  #COL_BEAT_A, d0
     move.w  #COL_BEAT_B, d1
     tst.l   DEMO_RUNS
@@ -361,7 +362,8 @@ BgProbe:
     move.w  #COL_BAD_A, d0
     move.w  #COL_BAD_B, d1
 .bp_gpu:
-    tst.l   GPU_FAIL
+    move.l  GPU_FAIL, d2
+    or.l    BLIT_STALL, d2
     beq.s   .bp_pick
     move.w  #COL_GPU_A, d0
     move.w  #COL_GPU_B, d1
@@ -371,6 +373,129 @@ BgProbe:
     move.w  d1, d0
 .bp_set:
     move.w  d0, BG
+    rts
+
+;---------------------------------------------------------------------------
+; ReadPad (Keen Dreams' main.s, verified on hardware): the controller is a
+; matrix of four strobed rows.  PAD_STATE gets the game buttons (PAD_B_*),
+; PAD_KEYS the keypad (KEY_B_*: instruments only, never game controls).
+; Only the state is written here; the C side keeps its own previous state for
+; edges, so every cell has one writer.
+;---------------------------------------------------------------------------
+JOY_ROW0        EQU     $F1FE
+JOY_ROW1        EQU     $81FD
+JOY_ROW2        EQU     $81FB
+JOY_ROW3        EQU     $81F7
+
+ReadPad:
+    movem.l d0-d4, -(sp)
+    moveq   #0, d3
+    moveq   #0, d4
+
+    move.w  #JOY_ROW0, d1
+    bsr     .rp_row
+    move.l  d0, d2
+    andi.l  #$0F, d2                        ; U D L R, already in order
+    or.l    d2, d3
+    btst    #5, d0
+    beq.s   .rp_noa
+    bset    #PAD_B_A, d3
+.rp_noa:
+    btst    #4, d0
+    beq.s   .rp_nopause
+    bset    #PAD_B_PAUSE, d3
+.rp_nopause:
+
+    move.w  #JOY_ROW1, d1
+    bsr     .rp_row
+    btst    #5, d0
+    beq.s   .rp_nob
+    bset    #PAD_B_B, d3
+.rp_nob:
+    moveq   #KEY_B_1, d2
+    bsr     .rp_k3
+    moveq   #KEY_B_4, d2
+    bsr     .rp_k2
+    moveq   #KEY_B_7, d2
+    bsr     .rp_k1
+    moveq   #KEY_B_STAR, d2
+    bsr     .rp_k0
+
+    move.w  #JOY_ROW2, d1
+    bsr     .rp_row
+    btst    #5, d0
+    beq.s   .rp_noc
+    bset    #PAD_B_C, d3
+.rp_noc:
+    moveq   #KEY_B_2, d2
+    bsr     .rp_k3
+    moveq   #KEY_B_5, d2
+    bsr     .rp_k2
+    moveq   #KEY_B_8, d2
+    bsr     .rp_k1
+    moveq   #KEY_B_0, d2
+    bsr     .rp_k0
+
+    move.w  #JOY_ROW3, d1
+    bsr     .rp_row
+    btst    #5, d0
+    beq.s   .rp_noopt
+    bset    #PAD_B_OPT, d3
+.rp_noopt:
+    moveq   #KEY_B_3, d2
+    bsr     .rp_k3
+    moveq   #KEY_B_6, d2
+    bsr     .rp_k2
+    moveq   #KEY_B_9, d2
+    bsr     .rp_k1
+    moveq   #KEY_B_HASH, d2
+    bsr     .rp_k0
+
+    move.w  d3, PAD_STATE
+    move.w  d4, PAD_KEYS
+    movem.l (sp)+, d0-d4
+    rts
+
+.rp_k3:
+    btst    #3, d0
+    beq.s   .rp_kdone
+    bset    d2, d4
+    rts
+.rp_k2:
+    btst    #2, d0
+    beq.s   .rp_kdone
+    bset    d2, d4
+    rts
+.rp_k1:
+    btst    #1, d0
+    beq.s   .rp_kdone
+    bset    d2, d4
+    rts
+.rp_k0:
+    btst    #0, d0
+    beq.s   .rp_kdone
+    bset    d2, d4
+.rp_kdone:
+    rts
+
+; d1 = strobe -> d0 = bits 0-3 the row's four keys, bits 4-5 JOYBUTS' two
+; buttons, active HIGH.  One LONG read takes JOYSTICK and JOYBUTS at the same
+; instant (JagLBA, hardware).
+.rp_row:
+    move.w  d1, JOYSTICK
+    moveq   #7, d2
+.rp_settle:
+    dbra    d2, .rp_settle
+    move.l  JOYSTICK, d0
+    not.l   d0
+    move.l  d0, d2
+    andi.l  #3, d2
+    lsl.l   #4, d2
+    lsr.l   #8, d0
+    lsr.l   #8, d0
+    lsr.l   #8, d0
+    andi.l  #$0F, d0
+    or.l    d2, d0
     rts
 
 ;---------------------------------------------------------------------------
@@ -485,24 +610,6 @@ VideoOnMinimal:
     rts
 
 ;---------------------------------------------------------------------------
-; LoadClut: d0 = road (0..30).  256 RGB16 entries, composed by sr2jag.py.
-;---------------------------------------------------------------------------
-LoadClut:
-    movem.l d0/a0-a1, -(sp)
-    andi.l  #$FF, d0
-    lsl.l   #8, d0
-    add.l   d0, d0                          ; * CLUT_BYTES (512)
-    movea.l #ROM_CLUT, a0
-    adda.l  d0, a0
-    movea.l #CLUT, a1
-    move.w  #127, d0
-.lc_loop:
-    move.l  (a0)+, (a1)+
-    dbra    d0, .lc_loop
-    movem.l (sp)+, d0/a0-a1
-    rts
-
-;---------------------------------------------------------------------------
 ; Copy32: a0 -> a1, d0 = bytes / 32 (non zero).  MOVEM, eight longs a round.
 ;---------------------------------------------------------------------------
 Copy32:
@@ -517,30 +624,6 @@ Copy32:
     cmpa.l  #-1, a2
     bne.s   .c32_loop
     movem.l (sp)+, d0-d7/a2
-    rts
-
-;---------------------------------------------------------------------------
-; LoadWorld: d0 = world (0..9) -> BACKDROP_BUF.
-;---------------------------------------------------------------------------
-LoadWorld:
-    movem.l d0/a0-a1, -(sp)
-    andi.l  #$FF, d0
-    mulu    #WORLD_STRIDE, d0
-    movea.l #ROM_WORLDS, a0
-    adda.l  d0, a0
-    movea.l #BACKDROP_BUF, a1
-    move.l  #(WORLD_BYTES/32), d0
-    bsr     Copy32
-    movem.l (sp)+, d0/a0-a1
-    rts
-
-LoadDash:
-    movem.l d0/a0-a1, -(sp)
-    movea.l #ROM_DASH, a0
-    movea.l #DASH_BUF, a1
-    move.l  #(DASH_BYTES/32), d0
-    bsr     Copy32
-    movem.l (sp)+, d0/a0-a1
     rts
 
 ; The 77 ship/explosion frames into DRAM: the OP reads them every line the
@@ -585,34 +668,7 @@ InitOpList:
     or.l    #((LINK_LO_STOP<<24)|(CC_YPOS_GT<<14)|OBJ_TYPE_BRANCH), d0
     move.l  d0, OP_BR_VDB+4
 
-; The dashboard, in two objects over the same pixels.  Rows 129..137 overlap
-; the viewport and are transparent there; from row 138 down the original's
-; index-0 pixels show palette entry 0, so that part is opaque.
-    lea     OBJ_SHADOW+(OBJ_DASH_TOP*OBJ_STRIDE), a0
-    move.l  #DASH_BUF, d0
-    moveq   #0, d1
-    move.w  VDB_VAL, d1
-    add.w   #((GAME_Y+DASH_Y)*2), d1
-    move.l  #DASH_TOP_H, d2
-    moveq   #0, d3
-    move.l  #GAME_IWIDTH, d4
-    move.l  #GAME_IWIDTH, d5
-    move.l  #OBJ_TRANS, d7
-    bsr     MakeObj
-
-    lea     OBJ_SHADOW+(OBJ_DASH_BOT*OBJ_STRIDE), a0
-    move.l  #(DASH_BUF+(DASH_TOP_H*SCR_W)), d0
-    moveq   #0, d1
-    move.w  VDB_VAL, d1
-    add.w   #((GAME_Y+VIEW_H)*2), d1
-    move.l  #(DASH_H-DASH_TOP_H), d2
-    moveq   #0, d3
-    move.l  #GAME_IWIDTH, d4
-    move.l  #GAME_IWIDTH, d5
-    moveq   #0, d7
-    bsr     MakeObj
-
-; The viewport: frame 1, which c_init has already rendered.
+; The game screen: frame 1, which c_init has already rendered.
     bsr     SetView
 
     bsr     ArmObjects

@@ -20,7 +20,7 @@ OUT=../build
 CFLAGS="${EXTRA_CFLAGS} -m68000 -O2 -std=c11 -fomit-frame-pointer -ffreestanding -fno-builtin \
         -fno-tree-loop-distribute-patterns --param=min-pagesize=0 -Wall -Wextra -I."
 
-SRC="port/play.c road.c libc.c game_main.c"
+SRC="port/play.c road.c hud.c libc.c game_main.c"
 OBJS="crt0.o"
 
 "$BIN/m68k-elf-as" -m68000 crt0.s -o crt0.o

@@ -212,10 +212,9 @@ void road_compose(road_ctx *c, const sr_play *p)
     k.n = 0;
     k.cur = 0;
 
-    /* First launch: the pristine screen (fn_3492's restore), then the
-     * records drawn before the ship. */
-    emit(&k, ROAD_OP_BASE, c->view);
-    emit(&k, ROAD_OP_COPY, c->backdrop);
+    /* First launch: the records drawn before the ship.  The pristine
+     * screen (fn_3492's restore) is already there: the Blitter copies it on
+     * the Jaguar, memcpy on the PC (road.h, "THE FRAME"). */
     emit(&k, ROAD_OP_BASE, road_base);
 
     int baserow = pos >> 3;
@@ -247,33 +246,40 @@ static uint16_t support(const sr_play *p, uint32_t z, uint16_t x, int in_tun)
     return (t & 0xf) ? 0x2800 : 0;
 }
 
-static int cowl_hidden(const road_ctx *c, int x, int y)
+/* The dashboard cowl over the viewport (render.c cowl_hidden): rows above
+ * 137 are always hidden; on the others, |x - 160| < half-width hides. */
+static int cowl_row(const road_ctx *c, int y, int *lo, int *hi)
 {
     if (y < 0 || y > 137)
-        return 1;
-    uint16_t hw = get16(c->tables + TAB_COWL + 2 * y);
-    if (!hw)
         return 0;
-    return x > 160 - (int)hw && x < 160 + (int)hw;
+    int hw = get16(c->tables + TAB_COWL + 2 * y);
+    *lo = hw ? 160 - hw : 1;              /* hidden: lo < x < hi */
+    *hi = hw ? 160 + hw : 0;
+    return 1;
 }
 
 /* render.c draw_ship: 29 screen columns x 24 rows, index 0 transparent,
- * clipped by the dashboard cowl exactly as the original. */
+ * clipped by the dashboard cowl exactly as the original.  Pointer rows, no
+ * per-pixel multiply: the 68000 has no 32-bit one, and this loop paid a
+ * library call per pixel (M3, measured on hardware). */
 void road_ship(const road_ctx *c, uint8_t *view, const uint8_t *cars, ship_pose_t s)
 {
     if (s.frame < 0)
         return;
-    const uint8_t *cell = cars + CAR_FRAME_BYTES * s.frame;
-    for (int i = 0; i < 24; i++)
+    const uint8_t *src = cars + CAR_FRAME_BYTES * s.frame;
+    uint8_t *row = view + (int32_t)(int16_t)s.top * 320;
+    for (int i = 0; i < 24; i++, src += 32, row += 320) {
+        int lo, hi;
+        if (!cowl_row(c, s.top + i, &lo, &hi))
+            continue;
         for (int j = 0; j < 29; j++) {
-            uint8_t px = cell[i * 32 + j];
-            if (!px)
+            uint8_t px = src[j];
+            int x = s.left + j;
+            if (!px || x < 0 || x >= 320 || (x > lo && x < hi))
                 continue;
-            int x = s.left + j, y = s.top + i;
-            if (x < 0 || x >= 320 || cowl_hidden(c, x, y))
-                continue;
-            view[y * 320 + x] = px;
+            row[x] = px;
         }
+    }
 }
 
 void road_shadow(const road_ctx *c, uint8_t *view, const sr_play *p, ship_pose_t s)
@@ -300,17 +306,20 @@ void road_shadow(const road_ctx *c, uint8_t *view, const sr_play *p, ship_pose_t
      * which turns the shadow into separate vertical bars - seen on the real
      * Jaguar by the user (M2), while our PC check, being a comparison WITH the
      * port, could only agree with it. */
-    for (int j = 0; j < 29; j++)
-        for (int i = 0; i < 9; i++) {
-            if (!stencil[i * 29 + j])
+    uint8_t *row = view + (int32_t)(int16_t)top * 320;
+    for (int i = 0; i < 9; i++, stencil += 29, row += 320) {
+        int lo, hi;
+        if (!cowl_row(c, top + i, &lo, &hi))
+            continue;
+        for (int j = 0; j < 29; j++) {
+            int x = left + j;
+            if (!stencil[j] || x < 0 || x >= 320 || (x > lo && x < hi))
                 continue;
-            int x = left + j, y = top + i;
-            if (x < 0 || x >= 320 || cowl_hidden(c, x, y))
-                continue;
-            uint8_t *q = view + y * 320 + x;
+            uint8_t *q = row + x;
             if (*q >= 1 && *q <= 15)
                 *q = (uint8_t)(*q + 0x2d);
             else if (*q == 0x3d)
                 *q = 0x40;
         }
+    }
 }
