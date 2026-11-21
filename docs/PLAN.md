@@ -107,8 +107,19 @@ heavy scenes. The 68000 is the limit. Next, in order: the composers on the
 GPU (the largest cost; JRISC reads the same trekg data), ship + shadow on
 the GPU (aligned-long read-modify-write), then the hot 32-bit divisions in
 play.c rewritten equivalently - guarded by the tick-for-tick demo check.
-- **M4 — sound.** SFX through the DSP PCM driver (Keen Dreams); music as OPL2
-  synthesised on the DSP; the engine hum.
+- **M4 — sound.** SFX through the DSP PCM driver (Keen Dreams, verified on
+  hardware), resampled at build time to the I2S rate. Music: **an OPL2
+  synthesised on the DSP** (9 channels x 2 operators = 18 FM operators),
+  fed with MUZAX's register writes at 180 Hz. Chosen over pre-rendering the
+  songs to PCM because the engine hum (OPL channels 7-8) follows the ship's
+  speed and cannot be recorded in advance, and because 13 songs of PCM
+  would weigh on the cartridge. Budget: JagLBA measured ~13 enveloped
+  operators at 20.8 kHz on hardware, so the synth runs at ~11-15 kHz (SCLK
+  from the I2S formula, never a "familiar" 11025/22050). Code and tables in
+  Jerry's 8 KB local RAM (its DRAM path is 16-bit and contended). Oracle:
+  the same song rendered on the PC by our synth's C model and by a reference
+  OPL emulator, compared sample by sample; the pre-render stays as a
+  listening reference only.
 - **M5 — the rest of the game.** Intro animation, menus, road selection,
   settings, completed roads saved to the cartridge EEPROM.
 - **M6 — distribution.** BYOA package (`make_rom.py` + prebuilt engine),
