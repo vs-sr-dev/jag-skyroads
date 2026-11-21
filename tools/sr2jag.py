@@ -274,13 +274,6 @@ def main(argv):
     objs = sd.load_trekdat(src)
     if len(objs) != 8:
         raise SystemExit(f"TREKDAT: {len(objs)} objects, expected 8")
-    index = bytearray()
-    body = bytearray()
-    for o in objs:
-        index += struct.pack('>II', 64 + len(body), len(o))
-        body += pad8(o)
-    write('trek.bin', bytes(index + body))
-
     write('trekg.bin', trek_gpu(objs))
     write('tables.bin', tables_blob(sd.exe_tables(src)))
 
