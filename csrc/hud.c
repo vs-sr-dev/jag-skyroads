@@ -1,12 +1,19 @@
 /* See hud.h.  Constants and colours are skyroads-port's hud.c. */
 #include "hud.h"
 
+/* Longs for the world and the clear (both buffers 4-aligned: ROM_WORLDS and
+ * WORLD_STRIDE, PRISTINE at 64): a byte loop here was most of the black
+ * pause at every road start on the 68000. */
+typedef uint32_t __attribute__((may_alias)) u32a;
+
 void hud_pristine(uint8_t *pristine, const uint8_t *world, const uint8_t *dash)
 {
-    for (int i = 0; i < 320 * 138; i++)
-        pristine[i] = world[i];
-    for (int i = 320 * 138; i < 320 * 200; i++)
-        pristine[i] = 0;
+    u32a *p = (u32a *)(void *)pristine;
+    const u32a *w = (const u32a *)(const void *)world;
+    for (int i = 0; i < 320 * 138 / 4; i++)
+        p[i] = w[i];
+    for (int i = 320 * 138 / 4; i < 320 * 200 / 4; i++)
+        p[i] = 0;
     for (int y = 0; y < 71; y++)
         for (int x = 0; x < 320; x++) {
             uint8_t c = dash[y * 320 + x];

@@ -97,8 +97,6 @@ static int gpu_run(uint32_t entry_pc)
 
 /* Ticks a finished road holds its last frame: the demo before it starts
  * again, a lost road before the retry, a completed one before the next. */
-#define HOLD_DEMO     72
-#define HOLD_LOST     36
 #define HOLD_DONE     72
 
 #define PADB(n)       (1u << (n))
@@ -185,10 +183,50 @@ static const uint32_t views[N_VIEWS] = { VIEW0, VIEW1, VIEW2 };
 static int view_next;          /* the buffer the next frame goes into */
 static hud_state hud_st[N_VIEWS];   /* what each frame buffer's dashboard shows */
 
+/* ---- FADES: the original's transitions (fn_4b72, skyroads-port game.c
+ * fade_to) ------------------------------------------------------------------
+ * 36 ticks to black with the game frozen and nothing drawn, the switch (the
+ * road built while the screen is black: road_start, one frame, the dashboard
+ * copied into the other buffers), 36 ticks back with the game running, as
+ * the port does.  The CLUT goes in the blanking: fade_publish fills
+ * FADE_PAL and bumps FADE_SEQ, the video interrupt copies it. */
+enum { FADE_NONE, FADE_OUT, FADE_IN };
+static int fade = FADE_NONE, fade_t;
+static int fade_e, fade_demo;   /* the road the fade-out leads to */
+static int hud_prime;           /* the next frame primes all dashboards */
+static uint16_t pal_full[256];  /* the road's palette at full light */
+
+/* fn_4b72/fn_4315: linear DAC scale, pct = 100 * t / 36, each channel
+ * scaled as c * pct / 100 - one table of 64 per step, no division a pixel. */
+static void fade_publish(int t)
+{
+    uint8_t lut[64];
+    int pct = t * 100 / 36;
+    for (int c = 0; c < 64; c++)
+        lut[c] = (uint8_t)(c * pct / 100);
+    uint16_t *out = (uint16_t *)(uintptr_t)FADE_PAL;
+    for (int i = 0; i < 256; i++) {
+        uint16_t v = pal_full[i];
+        out[i] = (uint16_t)(lut[v >> 11] << 11 | lut[(v >> 6) & 31] << 6 | lut[v & 63]);
+    }
+    HW32(FADE_SEQ) = HW32(FADE_SEQ) + 1;
+}
+
+static void fade_to(int e, int is_demo)
+{
+    if (fade == FADE_OUT)
+        return;
+    if (fade == FADE_NONE)
+        fade_t = 36;                    /* (from a fade-in: from where it is) */
+    fade = FADE_OUT;
+    fade_e = e;
+    fade_demo = is_demo;
+}
+
 /* A road from scratch: grid, pristine screen (its world + the dashboard),
  * palette.  The original loads all three at road start (game.c start_road,
- * render.c sr_render_set_world).  It runs inside c_tick, right after the
- * video interrupt, so the CLUT changes during the blanking. */
+ * render.c sr_render_set_world).  It runs at the bottom of a fade, the
+ * screen black: the palette goes to pal_full, the fade-in shows it. */
 static void road_start(int e, int is_demo)
 {
     const uint8_t *demo_blob = (const uint8_t *)(uintptr_t)ROM_DEMO;
@@ -200,7 +238,7 @@ static void road_start(int e, int is_demo)
     const uint16_t *clut = (const uint16_t *)(uintptr_t)(ROM_CLUT + (uint32_t)e * CLUT_BYTES);
     int lmax = -1, lmin = 1 << 30;
     for (int i = 0; i < 256; i++) {
-        ((volatile uint16_t *)(uintptr_t)CLUT_REG)[i] = clut[i];
+        pal_full[i] = clut[i];          /* the fade loads the CLUT (fade_publish) */
         int l = 2 * (clut[i] >> 11) + 3 * ((clut[i] >> 6) & 31) / 2 + (clut[i] & 63);
         if (l > lmax) { lmax = l; pf_fg = (uint8_t)i; }
         if (l < lmin) { lmin = l; pf_bg = (uint8_t)i; }
@@ -233,6 +271,10 @@ uint32_t c_init(void)
     road_gpu_quads((uint8_t *)(uintptr_t)COMP_IN, (const uint8_t *)(uintptr_t)ROM_TABLES);
     road_shadow_masks((uint8_t *)(uintptr_t)SHADOW_MASKS, (const uint8_t *)(uintptr_t)ROM_TABLES);
     road_start(0, 1);
+    fade = FADE_IN;             /* from black, as the original's intro */
+    fade_t = 0;
+    fade_publish(0);
+    hud_prime = 1;
     c_render();                 /* frame 1 ready before the OP list exists */
     return C_MAGIC;
 }
@@ -302,15 +344,32 @@ static void c_tick_inner(void)
     pad_prev = pad;
     keys_prev = keys;
 
+    /* the fade to black: everything frozen, nothing drawn (c_render); at
+     * the bottom the switch, then the fade-in with the game running */
+    if (fade == FADE_OUT) {
+        if (--fade_t <= 0) {
+            fade_t = 0;
+            road_start(fade_e, fade_demo);
+            fade = FADE_IN;
+            hud_prime = 1;
+        }
+        fade_publish(fade_t);
+        return;
+    }
+    if (fade == FADE_IN) {
+        if (++fade_t >= 36)
+            fade = FADE_NONE;
+        fade_publish(fade_t);
+    }
+
     if (demo) {
         if (edge & PAD_GAME_BTNS) {
             entry = 1;
-            road_start(entry, 0);
+            fade_to(entry, 0);
             return;
         }
         if (result != SR_RES_RUNNING) {
-            if (++hold >= HOLD_DEMO)
-                road_start(0, 1);
+            fade_to(0, 1);              /* the original fades to its menu */
             return;
         }
         demo_tick();
@@ -318,17 +377,17 @@ static void c_tick_inner(void)
     }
 
     if (edge & PADB(PAD_B_OPT)) {
-        road_start(0, 1);
+        fade_to(0, 1);
         return;
     }
     if (kedge & PADB(KEY_B_STAR)) {
         entry = prev_road(entry);
-        road_start(entry, 0);
+        fade_to(entry, 0);
         return;
     }
     if (kedge & PADB(KEY_B_HASH)) {
         entry = next_road(entry);
-        road_start(entry, 0);
+        fade_to(entry, 0);
         return;
     }
     if (edge & PADB(PAD_B_PAUSE))
@@ -336,11 +395,15 @@ static void c_tick_inner(void)
     if (paused)
         return;
 
+    /* deaths: the same road again, through a fade, at once (main 0x3b4);
+     * completed: held (the "Road Completed" text and the road menu come
+     * with M5), then the next road */
     if (result != SR_RES_RUNNING) {
-        if (++hold >= (uint32_t)(result == SR_RES_COMPLETE ? HOLD_DONE : HOLD_LOST)) {
-            if (result == SR_RES_COMPLETE)
-                entry = next_road(entry);
-            road_start(entry, 0);
+        if (result != SR_RES_COMPLETE)
+            fade_to(entry, 0);
+        else if (++hold >= HOLD_DONE) {
+            entry = next_road(entry);
+            fade_to(entry, 0);
         }
         return;
     }
@@ -378,7 +441,15 @@ static void blit_wait(void)
     HW32(BLIT_STALL) = HW32(BLIT_STALL) + 1;
 }
 
+static void blit_rows(uint32_t dst, uint32_t src, uint32_t rows);
+
 static void blit_view(uint32_t dst, uint32_t src)
+{
+    blit_rows(dst, src, VIEW_COPY_ROWS);
+}
+
+/* rows x 320 bytes, src -> dst, one blit (both 320 wide). */
+static void blit_rows(uint32_t dst, uint32_t src, uint32_t rows)
 {
     blit_wait();
     HW32(JAG_A1_BASE) = dst;
@@ -390,7 +461,7 @@ static void blit_view(uint32_t dst, uint32_t src)
     HW32(JAG_A2_STEP) = BLIT_STEP;
     HW32(JAG_A1_PIXEL) = 0;
     HW32(JAG_A2_PIXEL) = 0;
-    HW32(JAG_B_COUNT) = ((uint32_t)VIEW_COPY_ROWS << 16) | 320u;
+    HW32(JAG_B_COUNT) = (rows << 16) | 320u;
     HW32(JAG_B_CMD) = BLIT_CMD;
 }
 
@@ -547,6 +618,8 @@ static void lg_frame(void)
 
 void c_render(void)
 {
+    if (fade == FADE_OUT)
+        return;                         /* frozen while fading to black */
     uint32_t k = HW32(ROAD_SEQ) + 1;
     _Static_assert(N_VIEWS == 3, "wait_shown assumes three frame buffers");
     /* Frames 1 and 2 have buffers no frame used before; frame 1 is drawn
@@ -624,6 +697,21 @@ void c_render(void)
         }
         ovl_blit(c.view);
         lg_sum[LG_OVL] += clock_hl() - to;
+    }
+
+    /* The first frame of a road, drawn while the screen is black: its
+     * dashboard (redrawn from scratch: ~0.13 s on the 68000) goes into the
+     * other two buffers by the Blitter, so the first frames of the fade-in
+     * do not redraw it each (seen as a hitch at every road start). */
+    if (hud_prime) {
+        for (int i = 0; i < N_VIEWS; i++)
+            if (i != vb) {
+                blit_rows(views[i] + HUD_ROW0 * 320u, c.view + HUD_ROW0 * 320u,
+                          VIEW_ROWS - HUD_ROW0);
+                hud_st[i] = hud_st[vb];
+            }
+        blit_wait();
+        hud_prime = 0;
     }
 
     HW32(ROAD_VIEW) = c.view;

@@ -840,6 +840,24 @@ ViHandler:
 .vh_same:
     move.l  (sp)+, d0
     bsr     ArmObjects
+; A fade step C has published since: the whole CLUT, in the blanking and
+; after the list (JaguarDocs hw/04 rules 9 and 10: the objects first; a
+; colour change through the CLUT, never a CLUT rewritten mid-screen).
+    move.l  d0, -(sp)
+    move.l  FADE_SEQ, d0
+    cmp.l   FADE_SHOWN, d0
+    beq.s   .vh_pal
+    move.l  d0, FADE_SHOWN
+    movem.l d1/a0-a1, -(sp)
+    lea     FADE_PAL, a0
+    lea     CLUT, a1
+    move.w  #255, d1
+.vh_clut:
+    move.w  (a0)+, (a1)+
+    dbra    d1, .vh_clut
+    movem.l (sp)+, d1/a0-a1
+.vh_pal:
+    move.l  (sp)+, d0
     rte
 
 ;---------------------------------------------------------------------------

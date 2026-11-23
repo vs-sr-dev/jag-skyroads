@@ -116,6 +116,11 @@ HAL_CELLS = [
     ('GPU_FAIL', 4),             # C only: launches whose DONE never came
     # Ticks the main loop dropped (backlog beyond MAX_CATCHUP): RMAC only.
     ('TICK_DROP', 4),
+    # The palette fade (csrc/game_main.c fade_publish): C writes FADE_PAL and
+    # then FADE_SEQ + 1; the video interrupt copies FADE_PAL into the CLUT in
+    # the blanking and sets FADE_SHOWN = FADE_SEQ.  One writer each.
+    ('FADE_SEQ', 4),
+    ('FADE_SHOWN', 4),
     # The GameDrive's debug channel (src/gd.s): RMAC only, C reads.
     ('GD_BIOS', 4),              # the GD BIOS's base in GDB_BUF, 0 = none
     ('GD_SEND_FN', 4),           # GdSendC for C to call, 0 = nothing is sent
@@ -182,6 +187,8 @@ def dram_regions():
         # The five shadow stencils as 9 row masks each (road_shadow_masks):
         # the cartridge's bytes are unaligned for the GPU.
         ('SHADOW_MASKS', 5 * 9 * 4, 8),
+        # The CLUT the next video interrupt loads (fades; see FADE_SEQ).
+        ('FADE_PAL', 0x200, 8),
         # The GameDrive's BIOS image, fetched at boot (src/gd.s GdInstall).
         ('GDB_BUF', 0x1000, 8),
     ]

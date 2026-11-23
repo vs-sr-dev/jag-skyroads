@@ -191,7 +191,23 @@ Where a frame goes now (36 fps, the cap: one frame per tick): ship+shadow
   road.c and gc_c_tun_high; every other composer re-read against the
   disassembly and equal.
 
-Next, in order: the road-start hitch (~1 s at 7-9 fps, 20 ticks dropped: the dashboard
+- **Fades, as the original** (fn_4b72 pacing, skyroads-port game.c
+  fade_to): 36 ticks to black with the game frozen and nothing drawn, the
+  switch at black (road_start, one frame, its dashboard Blitter-copied into
+  the other two buffers), 36 ticks back with the game running. The palette
+  is scaled like the DAC (pct = 100 t / 36, a 64-entry table a step) into
+  FADE_PAL; the video interrupt loads the CLUT in the blanking (FADE_SEQ /
+  FADE_SHOWN). Deaths fade at once (no more hold), the demo loop, the demo's
+  buttons, Option and * / # fade too; a completed road holds 2 s first (the
+  "Road Completed" text comes with M5). The road-start hitch is gone: its
+  ~0.4 s of work now falls at black. hud_pristine copies with longs.
+
+Next session: **M4** (sound on the DSP), then M5 (menus, galaxy map, road
+choice, "Road Completed", all through fade_to). Smaller, later: the switch
+at black could drop the tick backlog it leaves (the fade-in now skips its
+first ~4 steps, invisible) and road_start could shrink further.
+
+Before that, superseded: the road-start hitch (~1 s at 7-9 fps, 20 ticks dropped: the dashboard
 redrawn from scratch into all three buffers); the ~120 half-lines of input
 + ship pose.
 - **M4 — sound.** SFX through the DSP PCM driver (Keen Dreams, verified on
