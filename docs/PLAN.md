@@ -45,7 +45,7 @@ ROMs (`build/`) are git-ignored.
 | road rasterisation: span fills | **GPU** | the only per-pixel work in the game |
 | backdrop, road layers, ship, dashboard | **Object Processor** | layers instead of repainting |
 | layer clears | Blitter | one large fill per layer per frame |
-| SFX, music (OPL2 synthesis), engine hum | **DSP** | the hum follows the speed: it has to be synthesised live |
+| SFX, music (OPL2 synthesis) | **DSP** | ~24 minutes of music do not fit as PCM: synthesised live |
 
 ### The screen
 
@@ -202,7 +202,7 @@ Where a frame goes now (36 fps, the cap: one frame per tick): ship+shadow
   "Road Completed" text comes with M5). The road-start hitch is gone: its
   ~0.4 s of work now falls at black. hud_pristine copies with longs.
 
-Next session: **M4** (sound on the DSP), then M5 (menus, galaxy map, road
+Next: M5 (menus, galaxy map, road
 choice, "Road Completed", all through fade_to). Smaller, later: the switch
 at black could drop the tick backlog it leaves (the fade-in now skips its
 first ~4 steps, invisible) and road_start could shrink further.
@@ -210,19 +210,56 @@ first ~4 steps, invisible) and road_start could shrink further.
 Before that, superseded: the road-start hitch (~1 s at 7-9 fps, 20 ticks dropped: the dashboard
 redrawn from scratch into all three buffers); the ~120 half-lines of input
 + ship pose.
-- **M4 — sound.** SFX through the DSP PCM driver (Keen Dreams, verified on
-  hardware), resampled at build time to the I2S rate. Music: **an OPL2
-  synthesised on the DSP** (9 channels x 2 operators = 18 FM operators),
-  fed with MUZAX's register writes at 180 Hz. Chosen over pre-rendering the
-  songs to PCM because the engine hum (OPL channels 7-8) follows the ship's
-  speed and cannot be recorded in advance, and because 13 songs of PCM
-  would weigh on the cartridge. Budget: JagLBA measured ~13 enveloped
-  operators at 20.8 kHz on hardware, so the synth runs at ~11-15 kHz (SCLK
-  from the I2S formula, never a "familiar" 11025/22050). Code and tables in
-  Jerry's 8 KB local RAM (its DRAM path is 16-bit and contended). Oracle:
-  the same song rendered on the PC by our synth's C model and by a reference
-  OPL emulator, compared sample by sample; the pre-render stays as a
-  listening reference only.
+- **M4 — sound. DONE on hardware (session 4)**: music and effects, no
+  starvation, 36 fps unchanged; "it sounds great" (user).
+  - **No engine hum.** The old premise ("OPL channels 7-8 follow the
+    ship's speed") came from skyroads-port's early FORMATS.md; its own
+    audio_misc.md corrects it, and the EXE agrees: every OPL write goes
+    through 0x5876, called only by the MUZAX driver; channels 7-8 are the
+    rhythm section's fixed pitches.  The game only switches songs (0x57a8)
+    and plays five digitised effects.  The OPL2 is still synthesised live,
+    for another reason: 14 songs are ~24 minutes of music, ~8 MB even as
+    4-bit ADPCM at 11 kHz.
+  - **The driver runs at build time** (`tools/muzax.py`, from the
+    disassembly): `cart/muzax.bin` holds each song as the OPL2 register
+    writes MUZAX would make, tick by tick, with the original's 255-tick wait
+    after the reset (its idle stream ds:0xcbc: songs start 1.42 s late in
+    the original too).  `tools/oracle/muzax_check.py` (build step 2c)
+    compares with skyroads-port's driver: equal on all 14 songs once the
+    port's delays are corrected - **the port waits one tick too many on
+    every delay** (0x5a5f jumps back to the counter test, which takes one
+    off in the same tick), so its music runs ~4 % slow.
+  - **Jerry is a YM3812** (`src/dsp_audio.s`): register decode, 18
+    operators in rhythm mode, envelopes, tremolo/vibrato, the rhythm noise
+    generator, at the I2S rate; plus one effect on top (`cart/sfx.bin`, the
+    SB samples resampled at build time; +6 dB over the port's level except
+    the explosion and INTRO.SND: the landing was lost under the music).
+    The plumbing (power-up order, banks, ISR, ring) is Keen Dreams'.
+  - **Its specification is `tools/oracle/opl2_model.c`** (integer, the same
+    tables from `tools/opl2.py`, the same order).  `tools/oracle/dsp_check.py`
+    runs the DSP binary in `jrisc.py` (now with a DSP mode, which also
+    enforces hw/06 rule 2) and wants the same samples bit for bit (build
+    step 6b; 80,000 samples of song 11 with an effect in the long run).
+    The model is measured against Nuked OPL3 by `tools/oracle/opl2_render.c`:
+    loudness within 0.5-1.4 dB in 20 ms windows on every song, spectrum
+    within ~2-3 dB a band (WAVs side by side in build/).
+  - **The budget decided the rate.**  An operator costs ~70-90 clk; what
+    made 18 fit: silent operators (level past 0xC00) skip the wave, dead
+    ones (at the envelope's bottom: only a key-on, which zeroes the phase,
+    revives them) skip everything, envelopes step a quarter of the slots per
+    sample (x4 steps), ATT3 is recomputed only when an input changes.  The
+    estimate (dsp_check) put the worst 64-sample window at ~2,100 clk:
+    **SCLK 36, 11,229 Hz**, as Keen Dreams.  On hardware: 0 starved
+    interrupts; the idle loop spins ~65-100 k/s during music against
+    ~410 k/s in silence.  The user hears no loss from the rate.
+  - 8 KB is tight: LOGSIN and EXP share one table (LOGSIN | EXP << 16); the
+    tables only the slow paths read live in DRAM (`OPL_TABS`, copied by
+    InitDspAudio) because **a movei of a 68000 label inside DSP code is
+    relocated WRONGLY by RMAC** (DCODE lands in the wrong half: main.bin).
+  - Open: effect 3 (fuel/oxygen warning, 0x13ed/0x14d6) is not in play.c,
+    so it does not play yet; songs 0 (intro) and 1 (menus) are M5's, the
+    demo uses 1 meanwhile; effect 2's 50 kHz (TC $EC) is the port's
+    reading, unverified; a higher rate needs a cheaper channel loop.
 - **M5 — the rest of the game.** Intro animation, menus, road selection,
   settings, completed roads saved to the cartridge EEPROM.
 - **M6 — distribution.** BYOA package (`make_rom.py` + prebuilt engine),

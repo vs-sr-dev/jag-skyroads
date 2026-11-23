@@ -35,6 +35,11 @@ SWITCHES = {
     'C_BLOB': 1,                 # the game logic, compiled C (M1)
 }
 
+# Jerry's I2S rate: Fs = clk / (64 (SCLK + 1)) (JaguarDocs hw/07 rule 1).
+# The OPL2 synthesiser, its tables (tools/opl2.py) and the effects resampled
+# at build time (tools/sr2jag.py) all follow this ONE number.
+AUDIO_SCLK = 36
+
 # The C blob's signature, returned by c_init: 'SKY1'.
 C_MAGIC = 0x534B5931
 CBSS_SIZE = 0x10000
@@ -127,6 +132,19 @@ HAL_CELLS = [
     ('GD_DROP', 4),              # lines dropped (nobody read the last one)
     ('GD_TIMEOUT', 4),           # bytes whose exchange ran out of patience
     ('GD_VER', 4),               # firmware (BCD) << 16 | ASIC
+    # Jerry (src/dsp_audio.s).  The 68000 writes the stream to play and the
+    # effect to start, each with its SEQ cell LAST (Keen Dreams' protocol,
+    # one delivery per frame); the DSP writes the counters, every 64 samples.
+    ('MUS_ADR', 4),              # 68000: the stream's start
+    ('MUS_LOOP', 4),             # 68000: its loop point
+    ('MUS_SEQ', 4),              # 68000: +1 = play the two above
+    ('SND_ADR', 4),              # 68000: the effect's samples
+    ('SND_LEN', 4),              # 68000: how many
+    ('SND_SEQ', 4),              # 68000: +1 = play them
+    ('SND_STARVE', 4),           # DSP: interrupts that found the ring empty
+    ('SND_IRQ', 4),              # DSP: I2S interrupts served
+    ('SND_DONE', 4),             # DSP: samples produced
+    ('SND_SPIN', 4),             # DSP: idle-loop turns with the ring full
     ('GD_STATE', 2),             # GdInstall: 0 ok, else where it failed
     ('GD_PEND', 2),              # the micro's answer to the last line pending
 ]
@@ -191,6 +209,11 @@ def dram_regions():
         ('FADE_PAL', 0x200, 8),
         # The GameDrive's BIOS image, fetched at boot (src/gd.s GdInstall).
         ('GDB_BUF', 0x1000, 8),
+        # The OPL2's slow tables (tools/opl2.py opl2_rom.inc: DINC, AINC,
+        # MULT, KSL), copied here by InitDspAudio.  At an ABSOLUTE address
+        # because the DSP cannot name a 68000 label: RMAC relocates a movei
+        # of one wrongly (DCODE lands in the wrong half; seen in main.bin).
+        ('OPL_TABS', 640, 8),
     ]
 
 
@@ -206,6 +229,8 @@ CART_BLOBS = [
     ('ROM_HUD', 'hud.bin'),
     ('ROM_DEMO', 'demo.bin'),
     ('ROM_DEMOX', 'demo_expect.bin'),   # tools/oracle/demo_oracle.c
+    ('ROM_MUZAX', 'muzax.bin'),         # tools/muzax.py
+    ('ROM_SFX', 'sfx.bin'),             # tools/sr2jag.py sfx_blob
 ]
 
 

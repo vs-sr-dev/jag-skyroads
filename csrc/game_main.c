@@ -14,6 +14,10 @@
  *   instrument until the road menu exists), 0 shows the frame's timings,
  *   9 checks the GPU's composers against road_compose (below).
  *
+ * SOUND (M4): the songs and the effects are Jerry's (src/dsp_audio.s, an
+ *   OPL2 synthesised on the DSP); this side only says which, through the
+ *   MUS_* and SND_* cells - see audio_post.
+ *
  * The boundary with RMAC is memory cells: PAD_STATE/PAD_KEYS in, GAME_MODE,
  * ROAD_SEQ and the demo check out.
  */
@@ -105,6 +109,57 @@ static int gpu_run(uint32_t entry_pc)
 
 void c_render(void);
 
+/* ---- SOUND: what Jerry plays (src/dsp_audio.s) --------------------------
+ * The cells: MUS_ADR, MUS_LOOP then MUS_SEQ + 1 start a stream of
+ * cart/muzax.bin (tools/muzax.py: 0 INIT, 1 + n song n, 15 silence);
+ * SND_ADR, SND_LEN then SND_SEQ + 1 an effect of cart/sfx.bin.  SEQ LAST,
+ * and ONE delivery per video frame (Keen Dreams' protocol, verified on
+ * hardware): the DSP reads the cells at its own 180 Hz, and two deliveries
+ * close together could hand it one effect's address with another's length.
+ * Requests are therefore only noted here and posted by audio_post, at most
+ * once per frame; the last effect asked wins, as on the Sound Blaster
+ * (play_sfx 0x3c2 stops the current one).
+ *
+ * The songs as the original picks them: the menu's (1) under the attract
+ * demo (its menu runs the demo); a game started from it gets 2 + rand % 12,
+ * never the same twice in a row (main 0x29f); deaths, completed roads and
+ * the keypad's road steps keep it.  A song already playing is not restarted
+ * (music_start 0x57b1). */
+static int song_now = -1, song_want = -1, game_song = -1, sfx_want = -1;
+static uint32_t aud_vi, rnd;
+
+static void music(int n)
+{
+    if (n != song_now) {
+        song_now = n;
+        song_want = n;
+    }
+}
+
+static void audio_post(void)
+{
+    uint32_t vi = HW32(IRQ_TICK);
+    if (vi == aud_vi)
+        return;
+    aud_vi = vi;
+    if (song_want >= 0) {
+        const uint8_t *mz = (const uint8_t *)(uintptr_t)ROM_MUZAX;
+        uint32_t k = 1u + (uint32_t)song_want;
+        HW32(MUS_ADR) = ROM_MUZAX + get32(mz + 4 + 8 * k);
+        HW32(MUS_LOOP) = ROM_MUZAX + get32(mz + 8 + 8 * k);
+        HW32(MUS_SEQ) = HW32(MUS_SEQ) + 1;
+        song_want = -1;
+    }
+    if (sfx_want >= 0) {
+        const uint8_t *sx = (const uint8_t *)(uintptr_t)ROM_SFX;
+        uint32_t k = (uint32_t)sfx_want;
+        HW32(SND_ADR) = ROM_SFX + get32(sx + 4 + 8 * k);
+        HW32(SND_LEN) = get32(sx + 8 + 8 * k);
+        HW32(SND_SEQ) = HW32(SND_SEQ) + 1;
+        sfx_want = -1;
+    }
+}
+
 /* ---- PERF: an instrument on the KEYPAD (key 0), off by default ----------
  * It answers one question - where a frame's time goes - and is switched off
  * when it has answered.  Times are in video HALF-LINES (31.8 us NTSC), the
@@ -127,7 +182,7 @@ static int ovl_dirty;             /* the overlay buffer needs redrawing */
 enum { LG_TICK, LG_IN, LG_G1, LG_SHIP, LG_G2, LG_HUD, LG_OVL, LG_WAIT, LG_SEND, LG_N };
 static uint32_t lg_sum[LG_N], lg_frames, lg_ticks, lg_mark, lg_t0, lg_drop0;
 static int lg_started;
-static char lg_line[192];
+static char lg_line[256];
 
 /* ---- CHECK: an instrument on the KEYPAD (key 9), off by default ---------
  * One question: does the GPU compose, on the real machine, the list
@@ -247,6 +302,17 @@ static void road_start(int e, int is_demo)
         sr_play_init(&play, &road, DEMO_DATA(demo_blob), DEMO_LEN(demo_blob));
     else
         sr_play_init(&play, &road, NULL, 0);
+    if (is_demo) {
+        music(1);
+    } else if (demo || song_now < 2) {
+        /* a game begins: 2 + rand % 12, not the last one again (0x29f) */
+        rnd = rnd * 1103515245u + 12345u + HW32(IRQ_TICK);
+        int k = (int)((rnd >> 16) % 12u);
+        if (k == game_song)
+            k = (k + 1) % 12;
+        game_song = k;
+        music(2 + k);
+    }
     demo = is_demo;
     for (int i = 0; i < N_VIEWS; i++)
         hud_st[i].valid = 0;
@@ -290,6 +356,10 @@ static void demo_tick(void)
     memset(&none, 0, sizeof none);
     sr_play_input(&play, &none);
     result = sr_play_tick(&play);
+    if (play.pending_sfx) {             /* fn_03c2's calls */
+        sfx_want = play.pending_sfx - 1;
+        play.pending_sfx = 0;
+    }
     ship_pose_t s = ship_pose(&play, play.tick, play.on_sticky);
 
     uint8_t rec[DEMO_REC_BYTES];
@@ -331,6 +401,7 @@ void c_tick(void)
     if (HW16(PAD_KEYS) & ~keys_prev & (PADB(KEY_B_0) | PADB(KEY_B_9)))
         ovl_dirty = 1;
     c_tick_inner();
+    audio_post();
     uint32_t dt = clock_hl() - t0;
     pf_tick += dt;
     lg_sum[LG_TICK] += dt;
@@ -418,6 +489,10 @@ static void c_tick_inner(void)
     in.held[SR_KEY_JUMP] = (pad & PAD_JUMP) != 0;
     sr_play_input(&play, &in);
     result = sr_play_tick(&play);
+    if (play.pending_sfx) {
+        sfx_want = play.pending_sfx - 1;
+        play.pending_sfx = 0;
+    }
 }
 
 /* ---- the Blitter: the pristine viewport into a frame buffer ------------
@@ -602,6 +677,19 @@ static void lg_frame(void)
     o = lg_hex(o, 'B', HW32(BLIT_STALL), 2);
     o = lg_hex(o, 'P', HW32(GD_DROP), 2);
     o = lg_hex(o, 'K', (uint32_t)perf_on | (uint32_t)check_on << 1, 1);
+    /* Jerry: samples produced, I2S interrupts, idle-loop turns with the ring
+     * full (the time left over), interrupts that found it empty (cumulative) */
+    {
+        static uint32_t done0, irq0, spin0;
+        uint32_t done = HW32(SND_DONE), irq = HW32(SND_IRQ), spin = HW32(SND_SPIN);
+        o = lg_hex(o, 'a', done - done0, 5);
+        o = lg_hex(o, 'q', irq - irq0, 5);
+        o = lg_hex(o, 'p', spin - spin0, 6);
+        o = lg_hex(o, 's', HW32(SND_STARVE), 4);
+        done0 = done;
+        irq0 = irq;
+        spin0 = spin;
+    }
     *o = 0;
     for (int i = 0; i < LG_N; i++)
         lg_sum[i] = 0;

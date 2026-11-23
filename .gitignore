@@ -17,3 +17,5 @@ __pycache__/
 include/map.inc
 include/jag_c.ld
 csrc/mem_map.h
+include/opl2.inc
+include/opl2_rom.inc

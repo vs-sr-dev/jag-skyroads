@@ -247,6 +247,10 @@ Start:
     bsr     InitOpList
     move.l  #BM_OPLIST, BOOT_MARK
 
+; Jerry after the first frame and before the video interrupt, as Keen Dreams
+; (verified on hardware): the DSP plays INIT, then whatever C posts.
+    bsr     InitDspAudio
+
 ; The mask is $2000, NOT $2100, and INT2 is written before INT1: the sequence
 ; Jaguar Chess invented ran on BigPEmu and died on hardware.
     moveq   #0, d0
@@ -877,6 +881,8 @@ LoadTrek:
 
 ; The GPU's code: its own section and .org, so it goes LAST.
     .include "src/gpu_road.s"
+
+    .include "src/dsp_audio.s"
 
 CodeEnd:
     .end

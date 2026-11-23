@@ -50,9 +50,17 @@ if errorlevel 1 (echo EQUIVALENCE BUILD ERROR & exit /b 1)
 build\play_equiv.exe cart 400
 if errorlevel 1 (echo PLAY.C DIFFERS FROM THE REFERENCE & exit /b 1)
 
-echo [3/8] memory map
+rem The songs: tools/muzax.py's register streams against skyroads-port's
+rem driver, tick by tick (corrected for its one-tick-late delays).
+echo [2c] MUZAX streams vs skyroads-port's driver
+"%PY%" tools\oracle\muzax_check.py %1 2000
+if errorlevel 1 (echo MUZAX STREAMS DIFFER & exit /b 1)
+
+echo [3/8] memory map, OPL2 tables
 "%PY%" tools\memory_map.py
 if errorlevel 1 (echo MEMORY MAP ERROR & exit /b 1)
+"%PY%" tools\opl2.py
+if errorlevel 1 (echo OPL2 TABLES ERROR & exit /b 1)
 
 echo [4/8] ambiguous expressions (RMAC has no precedence)
 "%PY%" tools\check_expr.py
@@ -68,6 +76,14 @@ rem phases, a few seconds).  tools\oracle\gpu_check.py 1 = every position.
 echo [6/8] GPU composers vs road_compose
 "%PY%" tools\oracle\gpu_check.py 37
 if errorlevel 1 (echo GPU COMPOSERS DIFFER & exit /b 1)
+
+rem Jerry's OPL2: the real DSP binary in the interpreter against its C model
+rem (tools/oracle/opl2_model.c), sample for sample: half a second of song 11
+rem from its first note, with an effect.  tools\oracle\dsp_check.py 5 11 2
+rem is the long run.
+echo [6b] DSP OPL2 vs its model
+"%PY%" tools\oracle\dsp_check.py 0.5 11 2 now
+if errorlevel 1 (echo DSP OPL2 DIFFERS FROM ITS MODEL & exit /b 1)
 
 rem The command goes to the image as ONE string, or it exits 0 doing nothing.
 echo [7/8] C blob (m68k-elf-gcc in Docker)

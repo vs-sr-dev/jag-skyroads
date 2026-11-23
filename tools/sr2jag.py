@@ -30,6 +30,10 @@ Blobs:
                  trek_gpu below).
   tables.bin     the renderer's tables from SKYROADS.EXE's data segment.
   demo.bin       u32 length, then DEMO.REC verbatim.
+  muzax.bin      the songs as OPL2 register streams (tools/muzax.py), which
+                 Jerry plays through its synthesised OPL2 (src/dsp_audio.s).
+  sfx.bin        SFX.SND's five effects and INTRO.SND, resampled to Jerry's
+                 rate (tools/opl2.py FS), signed 8-bit (see sfx_blob).
 """
 import os
 import struct
@@ -37,6 +41,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import srdata as sd
+import muzax
+import opl2
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CART = os.path.join(REPO, 'cart')
@@ -214,6 +220,71 @@ def hud_blob(src, tabs):
     return bytes(blob + bytes(-len(blob) % 8))
 
 
+# Each effect's level, against the DSP's fixed gain (src/dsp_audio.s: an
+# effect sample << 8, twice skyroads-port's << 7).  The landing and the other
+# small effects were too quiet under the music on the Jaguar (user, session
+# 4): +6 dB for them; the explosion (rms 86 against 25-47) and INTRO.SND keep
+# the port's level.
+SFX_GAIN = [0.5, 1.0, 1.0, 1.0, 1.0, 0.5]
+
+
+def resample(pcm, rate_in, rate_out, taps=16, gain=1.0):
+    """Unsigned 8-bit PCM -> signed 8-bit at rate_out, band-limited.
+
+    A windowed sinc (Blackman, `taps` zero crossings a side) with its cutoff
+    at 0.45 of the LOWER rate: SFX.SND's 50 kHz effect folds into Jerry's
+    16 kHz otherwise.
+    """
+    import numpy as np
+    x = np.frombuffer(pcm, dtype=np.uint8).astype(np.float64) - 128.0
+    n_out = int(len(x) * rate_out / rate_in)
+    fc = 0.45 * min(rate_in, rate_out) / rate_in          # cycles per input sample
+    t = np.arange(n_out) * (rate_in / rate_out)
+    base = np.floor(t).astype(np.int64)
+    acc = np.zeros(n_out)
+    span = int(np.ceil(taps / (2 * fc)))
+    for k in range(-span, span + 1):
+        idx = base + k
+        d = t - idx
+        w = 2 * fc * np.sinc(2 * fc * d)
+        win = 0.42 + 0.5 * np.cos(np.pi * d / (span + 1)) + 0.08 * np.cos(2 * np.pi * d / (span + 1))
+        ok = (idx >= 0) & (idx < len(x))
+        acc += np.where(ok, x[np.clip(idx, 0, len(x) - 1)] * w * win, 0.0)
+    return np.clip(np.round(acc * gain), -128, 127).astype(np.int8).tobytes()
+
+
+def sfx_blob(src):
+    """SFX.SND's records and INTRO.SND, at Jerry's rate.
+
+        u32 n                   6: SFX.SND 0..4, INTRO.SND
+        u32 offset, samples [n] from the blob's start
+        samples                 signed 8-bit, each on a phrase, zero-padded
+                                (the DSP reads a long per four samples and the
+                                last one may run over by three bytes)
+
+    The rates are the Sound Blaster's 1,000,000 / (256 - TC), TC being each
+    record's first byte (EXE 0x443); INTRO.SND has no header and plays at
+    TC $5A (0x476B).  Effect 2's TC $EC gives 50 kHz, beyond what an 8-bit
+    single-cycle transfer could do on most cards; skyroads-port plays it at
+    50 kHz and so do we (audio_misc.md 4.3: TBD on real hardware).
+    """
+    snd = src.read('SFX.SND')
+    n = struct.unpack_from('<H', snd, 0)[0] // 2 - 1
+    offs = struct.unpack_from('<%dH' % (n + 1), snd, 0)
+    recs = []
+    for i in range(n):
+        rec = snd[offs[i]:offs[i + 1]]
+        recs.append((rec[1:], 1000000 / (256 - rec[0])))
+    recs.append((src.read('INTRO.SND'), 1000000 / (256 - 0x5A)))
+    head = 4 + 8 * len(recs)
+    table, data = bytearray(struct.pack('>I', len(recs))), bytearray()
+    for (pcm, rate), gain in zip(recs, SFX_GAIN):
+        out = resample(pcm, rate, opl2.FS, gain=gain)
+        table += struct.pack('>II', head + len(data), len(out))
+        data += pad8(out)
+    return bytes(table + data)
+
+
 def find_source(argv):
     if len(argv) > 1:
         return argv[1]
@@ -313,6 +384,10 @@ def main(argv):
 
     demo = src.read('DEMO.REC')
     write('demo.bin', pad8(struct.pack('>I', len(demo)) + demo))
+
+    # --- sound: the songs as OPL2 streams, the effects at Jerry's rate -------
+    write('muzax.bin', pad8(muzax.build_blob(src.read('MUZAX.LZS'))))
+    write('sfx.bin', sfx_blob(src))
 
     # --- previews: what the Jaguar should show, from the blobs ------------------
     clut = cluts[1]

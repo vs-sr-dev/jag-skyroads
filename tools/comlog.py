@@ -11,6 +11,9 @@ Raw lines go to build/logs/<rom>_<hhmmss>.log; the table goes to stdout.
 
 A line:  S d=DEMO_TICK r=road m=mode f=frames t=ticks x=dropped A=second
          T I G N H D O W L (sums, half-lines) F B P K
+         a q p s: Jerry - samples produced, I2S interrupts, idle-loop turns
+         with the ring full (all three in the second), starved interrupts
+         (since boot)
 Columns printed: half-lines PER FRAME, and X = A minus everything measured,
 i.e. the time no phase sees (idle STOP when ahead, main loop, interrupts...).
 """
@@ -50,6 +53,8 @@ def row(v):
         flags += f'  gpufail={v.get("F")} blitstall={v.get("B")}'
     if v.get('P'):
         flags += f'  logdrop={v.get("P")}'
+    if 'a' in v:
+        flags += f'  dsp {v["a"]}/s irq {v.get("q", 0)}/s spin {v.get("p", 0)}/s starve {v.get("s", 0)}'
     return (f'{v.get("d", 0):5d} {v.get("r", 0):2d} {v.get("f", 0):3d} {v.get("t", 0):3d} '
             f'{v.get("x", 0):3d} | {cols} | {x / f:5.0f} {100 * x / max(a, 1):4.0f} {a:6d}{flags}')
 
