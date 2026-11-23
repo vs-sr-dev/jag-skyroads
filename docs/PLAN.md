@@ -176,8 +176,22 @@ the time no phase covers.
 Where a frame goes now (36 fps, the cap: one frame per tick): ship+shadow
 ~300, physics ~190, input+pose ~120, GPU ~160, gauges ~46.
 
-Next, in order: ship + shadow on the GPU (~300 half-lines on the 68000);
-the road-start hitch (~1 s at 7-9 fps, 20 ticks dropped: the dashboard
+- **Ship and shadow on the GPU**, in the same launch as the road: list 1,
+  then the ship and its shadow (`gs_*`/`gh_*` in src/gpu_road.s), then
+  list 2. The 68000 only writes `SHIP_IN` (road_ship_input: frame row,
+  position, the shadow's stencil as 9 row masks made once at boot, one clip
+  long per row for the cowl). gpu_check draws a ship and a shadow at varied
+  poses on every checked screen, pixel for pixel against road_ship /
+  road_shadow_draw (mutations caught). The demo now sits at 35-37 fps in
+  every second, with 10-47 % of the time idle.
+- **compose_tun_high was wrong in skyroads-port** (roads 8 and 9, seen by
+  the user against the original): render.c draws kind 4, the tunnel's arch,
+  over the high block with a bore; the EXE (0x2fb0) draws kind 3's split
+  tops when the nearer tile is low, as compose_tun_low ends. Fixed in
+  road.c and gc_c_tun_high; every other composer re-read against the
+  disassembly and equal.
+
+Next, in order: the road-start hitch (~1 s at 7-9 fps, 20 ticks dropped: the dashboard
 redrawn from scratch into all three buffers); the ~120 half-lines of input
 + ship pose.
 - **M4 — sound.** SFX through the DSP PCM driver (Keen Dreams, verified on
@@ -247,6 +261,10 @@ constants inside `play.c` stay where the reimplementation put them.
 - An instrument that draws every frame must be measured too: the timing
   digits cost more than the phases they showed (session 2). Draw once, copy
   with the Blitter.
+- skyroads-port's renderer is not the truth either: compose_tun_high drew
+  the tunnel's arch over a block (session 3). Our checks compare WITH the
+  port, so only the user's eye against the original, then the EXE, can
+  catch such errors: read each composer against the disassembly.
 - **Measure the 68000 code you did not write before blaming the drawing**
   (session 3): the drops the eye tied to "how much is on screen" were the
   physics probing blocks and tunnels; the on-screen averages even hid it

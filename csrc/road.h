@@ -107,8 +107,46 @@ void road_compose(road_ctx *c, const sr_play *p);
 void road_gpu_quads(uint8_t *cin, const uint8_t *tables);
 void road_gpu_input(uint8_t *cin, const sr_play *p, uint32_t view);
 
-/* Step 2, on the CPU, into the frame buffer as this CPU addresses it. */
+/* Step 2 - the ship, then its shadow - drawn by the GPU between the two
+ * lists (src/gpu_road.s gs_*), from this block (SHIP_IN in
+ * tools/memory_map.py), big-endian longs:
+ *   SIN_SRC    the ship frame's first row (32-byte rows), 0 = no ship
+ *   SIN_ROW0   the frame buffer address of the ship's row 0 (y = top)
+ *   SIN_LEFT   its screen x, signed
+ *   SIN_MASK   the shadow stencil's 9 row masks (bit 31 = column 0), 0 = none
+ *   SIN_SROW0, SIN_SLEFT   the same for the shadow
+ *   SIN_CLIP   24 longs, SIN_SCLIP 9: per row, (A + 1) << 16 | B: a pixel
+ *              at x is drawn when 0 <= x < 320 and (x <= A or x >= B) -
+ *              the cowl hides A < x < B; a row off the viewport has A = -1,
+ *              B = 320 and draws nothing. */
+#define SIN_SRC    0
+#define SIN_ROW0   4
+#define SIN_LEFT   8
+#define SIN_MASK   12
+#define SIN_SROW0  16
+#define SIN_SLEFT  20
+#define SIN_CLIP   32
+#define SIN_SCLIP  (SIN_CLIP + 4 * 24)
+#define SIN_BYTES  (SIN_SCLIP + 4 * 9)
+#define SHADOW_MASK_BYTES (5 * 9 * 4)
+
+/* Once: the five shadow stencils as row masks (SHADOW_MASKS). */
+void road_shadow_masks(uint8_t *dst, const uint8_t *tables);
+/* Every frame: the block above.  cars_at / masks_at / view: GPU addresses. */
+void road_ship_input(uint8_t *sin, const road_ctx *c, const sr_play *p, ship_pose_t s,
+                     uint32_t cars_at, uint32_t masks_at);
+/* The same from a shadow already placed (the PC check's own poses). */
+void road_ship_input_at(uint8_t *sin, const road_ctx *c, ship_pose_t s,
+                        int shadow, int map, int top, int left,
+                        uint32_t cars_at, uint32_t masks_at);
+
+/* The C originals the GPU code transcribes (and the PC checks against),
+ * into the frame buffer as this CPU addresses it. */
 void road_ship(const road_ctx *c, uint8_t *view, const uint8_t *cars, ship_pose_t s);
 void road_shadow(const road_ctx *c, uint8_t *view, const sr_play *p, ship_pose_t s);
+/* road_shadow in its two halves: where (from the physics: 0 = no shadow)
+ * and the drawing. */
+int road_shadow_where(const sr_play *p, ship_pose_t s, int *map, int *top, int *left);
+void road_shadow_draw(const road_ctx *c, uint8_t *view, int map, int top, int left);
 
 #endif

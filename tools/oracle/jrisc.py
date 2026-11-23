@@ -148,6 +148,12 @@ class Gpu:
             self.c = not self.c
         elif op == 41:                                  # load
             r[d] = self.rd32(r[s])
+        elif op == 39:                                  # loadb: DRAM only (the right byte
+            a = r[s] & 0xFFFFFF                         # there, JaguarDocs T-GPU-11; the
+            if a >= 0x200000:                           # local RAM returns the whole long)
+                raise JriscError(f'loadb outside DRAM at ${self.pc - 2:06X}')
+            self.poison(a)
+            r[d] = self.dram[a]
         elif op == 45:                                  # storeb
             self.wr(r[s], r[d], 1)
         elif op == 47:                                  # store

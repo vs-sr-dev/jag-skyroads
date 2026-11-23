@@ -66,6 +66,7 @@ GpuRom:
     .org    G_RAM
 
 GpuRoad:
+    moveq   #0, r28                     ; no ship (the composers set it)
     movei   #GPU_CMD, r0
     load    (r0), r1
     movei   #gc_compose, r2
@@ -78,7 +79,7 @@ gr_start:
     movei   #(VIEW0_SIZE/4), r22
     moveq   #0, r2
     movei   #gr_next, r12
-    movei   #gr_done, r13
+    movei   #gr_listend, r13
     movei   #gr_base, r14
     movei   #gr_copy, r15
     movei   #gr_line, r16
@@ -476,6 +477,7 @@ gc_bwait:
     jump    NE, (r4)
     nop
 gc_bdone:
+    moveq   #1, r28                     ; the ship comes after list 1
     movei   #CMD_BUF, r1
     movei   #gr_start, r0
     jump    T, (r0)
@@ -658,7 +660,7 @@ gc_tu1:
     jump    T, (r29)
     nop
 
-; shape 5: compose_tun_high (0x2fb0)
+; shape 5: compose_tun_high (0x2fb0, as the EXE: see gc_th2)
 gc_c_tun_high:
     FLOOR
     movei   #gc_th1, r30
@@ -677,12 +679,16 @@ gc_th1:
     jump    PL, (r30)
     nop
     FILL    0
+; kind 3's split tops when the nearer tile is low - NOT kind 4's arch, which
+; skyroads-port draws here (EXE 0x2fe6-0x2ff7; csrc/road.c compose_tun_high)
 gc_th2:
-    SEEK    4
-    FILL    0
-    FILL    0
-    FILL    0
-    FILL    0
+    movei   #gc_high_top, r30
+    SHAPE   r6
+    cmpq    #2, r0
+    jump    PL, (r30)
+    nop
+    SEEK    3
+    SKIP
     FILL    0
     FILL    0
 ; compose_highblock and compose_tun_high end alike: the block's top (kind 5)
@@ -711,6 +717,200 @@ gc_ht3:
     nop
     FILL    0
     jump    T, (r29)
+    nop
+
+;---------------------------------------------------------------------------
+; BETWEEN THE LISTS: list 1's END lands here.  After the composers' launch
+; (r28 = 1) the ship and its shadow are drawn, then list 2 is filled from the
+; address the composers left in GPU_CMD; otherwise the launch is over.
+; road_ship / road_shadow_draw (csrc/road.c) transcribed, from the block the
+; 68000 wrote (SHIP_IN, csrc/road.h SIN_*); the PC runs this against them
+; pixel for pixel (tools/oracle/gpu_check.py).
+;
+; A pixel at x is drawn when 0 <= x < 320 and (x < A1 or x >= B), with
+; A1 = clip >> 16 and B = clip & $FFFF (the cowl hides A1 <= x < B).
+;
+;   r1  ship frame row / mask cursor   r2  frame buffer row (y)
+;   r3  left                           r4  clip cursor
+;   r5  rows left                      r6  B           r7  A1
+;   r8  x                              r9  source cursor / scratch
+;   r10 pixels (4 a long) / mask       r11 columns left
+;   r12 pixels left in r10             r13 the next long (prefetched)
+;   r15 the pixel                      r16-r19 jump targets
+;   r20 320   r21 $FFFF   r22 scratch  r23 $3D   r24 $40
+;---------------------------------------------------------------------------
+gr_listend:
+    movei   #gr_done, r0
+    cmpq    #0, r28
+    jump    EQ, (r0)
+    nop
+    moveq   #0, r28
+    movei   #320, r20
+    movei   #$FFFF, r21
+    movei   #SHIP_SRC, r0
+    load    (r0), r1
+    movei   #gs_shadow, r0
+    cmpq    #0, r1
+    jump    EQ, (r0)                    ; no ship (the explosion is over)
+    nop
+    movei   #SHIP_ROW0, r0
+    load    (r0), r2
+    movei   #SHIP_LEFT, r0
+    load    (r0), r3
+    movei   #SHIP_CLIP, r4
+    moveq   #24, r5
+    movei   #gs_srow, r16
+    movei   #gs_spix, r17
+    movei   #gs_sskip, r18
+    movei   #gs_sdraw, r19
+gs_srow:
+    load    (r4), r6
+    addq    #4, r4
+    or      r13, r13                    ; the last row's prefetch, read (TOM 13)
+    move    r1, r9
+    load    (r9), r13                   ; the row's first 4 pixels
+    addq    #4, r9
+    move    r6, r7
+    shrq    #16, r7
+    and     r21, r6
+    move    r3, r8
+    moveq   #29, r11
+    moveq   #0, r12
+gs_spix:
+    cmpq    #0, r12
+    jr      NE, gs_shave
+    nop
+    move    r13, r10                    ; 4 more pixels
+    load    (r9), r13                   ; and the next 4 on their way
+    addq    #4, r9
+    moveq   #4, r12
+gs_shave:
+    subq    #1, r12
+    move    r10, r15
+    shlq    #8, r10
+    shrq    #24, r15                    ; the pixel; 0 = transparent
+    jump    EQ, (r18)
+    nop
+    cmpq    #0, r8
+    jump    MI, (r18)                   ; x < 0
+    nop
+    move    r8, r22
+    sub     r20, r22
+    jump    PL, (r18)                   ; x >= 320
+    nop
+    move    r8, r22
+    sub     r7, r22
+    jump    MI, (r19)                   ; x < A1: left of the cowl
+    nop
+    move    r8, r22
+    sub     r6, r22
+    jump    MI, (r18)                   ; A1 <= x < B: under it
+    nop
+gs_sdraw:
+    move    r2, r22
+    add     r8, r22
+    storeb  r15, (r22)
+gs_sskip:
+    addq    #1, r8
+    subq    #1, r11
+    jump    NE, (r17)
+    nop
+    addq    #32, r1                     ; the frame's next row
+    add     r20, r2
+    subq    #1, r5
+    jump    NE, (r16)
+    nop
+
+; The shadow: palette remap of what is already there (road_shadow_draw).
+gs_shadow:
+    or      r13, r13                    ; the ship's last prefetch (TOM 13:
+    movei   #SHIP_MASK, r0              ; gr_start rewrites r13)
+    load    (r0), r1
+    movei   #gs_done, r0
+    cmpq    #0, r1
+    jump    EQ, (r0)                    ; no shadow this frame
+    nop
+    movei   #SHIP_SROW0, r0
+    load    (r0), r2
+    movei   #SHIP_SLEFT, r0
+    load    (r0), r3
+    movei   #SHIP_SCLIP, r4
+    moveq   #9, r5
+    movei   #$3D, r23
+    movei   #$40, r24
+    movei   #gh_row, r16
+    movei   #gh_pix, r17
+    movei   #gh_skip, r18
+    movei   #gh_draw, r19
+gh_row:
+    load    (r4), r6
+    addq    #4, r4
+    load    (r1), r10                   ; the row's mask, column 0 in bit 31
+    addq    #4, r1
+    move    r6, r7
+    shrq    #16, r7
+    and     r21, r6
+    move    r3, r8
+    moveq   #29, r11
+gh_pix:
+    move    r10, r15
+    shlq    #1, r10
+    cmpq    #0, r15
+    jump    PL, (r18)                   ; not in the stencil
+    nop
+    cmpq    #0, r8
+    jump    MI, (r18)
+    nop
+    move    r8, r22
+    sub     r20, r22
+    jump    PL, (r18)
+    nop
+    move    r8, r22
+    sub     r7, r22
+    jump    MI, (r19)
+    nop
+    move    r8, r22
+    sub     r6, r22
+    jump    MI, (r18)
+    nop
+gh_draw:
+    move    r2, r22
+    add     r8, r22
+    loadb   (r22), r15                  ; a byte from DRAM: the right one
+    move    r15, r9                     ; (JaguarDocs T-GPU-11, hardware)
+    subq    #1, r9
+    jump    MI, (r18)                   ; 0: left alone
+    nop
+    move    r15, r9
+    subq    #16, r9
+    jr      MI, gh_dark                 ; 1..15: + $2D
+    nop
+    cmp     r23, r15
+    jump    NE, (r18)                   ; anything else but $3D: left alone
+    nop
+    storeb  r24, (r22)                  ; $3D -> $40
+    jump    T, (r18)
+    nop
+gh_dark:
+    addq    #31, r15
+    addq    #14, r15
+    storeb  r15, (r22)
+gh_skip:
+    addq    #1, r8
+    subq    #1, r11
+    jump    NE, (r17)
+    nop
+    add     r20, r2
+    subq    #1, r5
+    jump    NE, (r16)
+    nop
+
+; List 2, from where the composers left its address.
+gs_done:
+    movei   #GPU_CMD, r0
+    load    (r0), r1
+    movei   #gr_start, r0
+    jump    T, (r0)
     nop
 
 ; JagLBA's epilogue (GpuCommon_Done), verified on hardware.  The barrier's

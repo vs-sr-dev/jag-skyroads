@@ -46,6 +46,12 @@ _Static_assert(COMP_POS == COMP_IN + CIN_POS && COMP_BASE == COMP_IN + CIN_BASE
                && COMP_WIN == COMP_IN + CIN_WIN && COMP_ROWS == CIN_ROWS
                && CIN_BYTES <= COMP_IN_SIZE,
                "GPU composers' input: csrc/road.h CIN_* vs tools/memory_map.py");
+_Static_assert(SHIP_SRC == SHIP_IN + SIN_SRC && SHIP_ROW0 == SHIP_IN + SIN_ROW0
+               && SHIP_LEFT == SHIP_IN + SIN_LEFT && SHIP_MASK == SHIP_IN + SIN_MASK
+               && SHIP_SROW0 == SHIP_IN + SIN_SROW0 && SHIP_SLEFT == SHIP_IN + SIN_SLEFT
+               && SHIP_CLIP == SHIP_IN + SIN_CLIP && SHIP_SCLIP == SHIP_IN + SIN_SCLIP
+               && SIN_BYTES <= SHIP_IN_SIZE && SHADOW_MASK_BYTES <= SHADOW_MASKS_SIZE,
+               "the GPU's ship input: csrc/road.h SIN_* vs tools/memory_map.py");
 
 /* Ceiling of the wait for DONE, in polls (about a second with the pause
  * below).  The wait must never be without an exit: a stuck GPU becomes a
@@ -225,6 +231,7 @@ uint32_t c_init(void)
     HW32(DEMO_BAD) = 0;
     HW32(DEMO_RUNS) = 0;
     road_gpu_quads((uint8_t *)(uintptr_t)COMP_IN, (const uint8_t *)(uintptr_t)ROM_TABLES);
+    road_shadow_masks((uint8_t *)(uintptr_t)SHADOW_MASKS, (const uint8_t *)(uintptr_t)ROM_TABLES);
     road_start(0, 1);
     c_render();                 /* frame 1 ready before the OP list exists */
     return C_MAGIC;
@@ -568,23 +575,22 @@ void c_render(void)
      * (src/gpu_road.s). */
     road_gpu_input((uint8_t *)(uintptr_t)COMP_IN, &play, c.view);
     ship_pose_t s = ship_pose(&play, play.tick, play.on_sticky);
+    road_ship_input((uint8_t *)(uintptr_t)SHIP_IN, &c, &play, s, CARS_BUF, SHADOW_MASKS);
     blit_view(c.view, PRISTINE);
     t[1] = clock_hl();
 
-    /* 1. composers and the records before the ship (GPU); 2. ship and
-     * shadow (68000); 3. records after the ship (GPU, from the address the
-     * first launch left in GPU_CMD); 4. gauges, incrementally (68000).
-     * The GPU's epilogue pushes its pixels out before DONE. */
+    /* ONE launch: the composers, the records before the ship, the ship and
+     * its shadow (from SHIP_IN), the records after it - all on the GPU
+     * (src/gpu_road.s).  Then the gauges, incrementally (68000).  The GPU's
+     * epilogue pushes its pixels out before DONE.  The ship and second-list
+     * phases of the log stay, now empty. */
     HW32(GPU_CMD) = 0;
     gpu_launch();
+    t[2] = clock_hl();
     if (check_on)
         check_lists(&c);
-    t[2] = clock_hl();
-    road_ship(&c, view, (const uint8_t *)(uintptr_t)CARS_BUF, s);
-    road_shadow(&c, view, &play, s);
     t[3] = clock_hl();
-    gpu_launch();
-    t[4] = clock_hl();
+    t[4] = t[3];
     hud_update(view, (const uint8_t *)(uintptr_t)PRISTINE,
                (const uint8_t *)(uintptr_t)ROM_HUD, &play, &hud_st[vb]);
     t[5] = clock_hl();

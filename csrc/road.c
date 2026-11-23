@@ -129,7 +129,13 @@ static void compose_tunnel(comp *k)             /* 0x303d */
     }
 }
 
-static void compose_tun_high(comp *k)           /* 0x2fb0 */
+/* 0x2fb0.  skyroads-port's render.c draws here kind 4 - the tunnel's arch
+ * gradient, six records - which the EXE does not: after the lower side it
+ * draws kind 3's split tops (skip one, then two), when the nearer tile is
+ * low, exactly as compose_tun_low ends (disassembly 0x2fe6-0x2ff7).  The
+ * port painted the inside of the bore over the block (roads 8 and 9, seen
+ * on the Jaguar by the user against the original, session 3). */
+static void compose_tun_high(comp *k)
 {
     compose_floor(k);
     if (shape(k->nearer) < 2) {
@@ -140,9 +146,12 @@ static void compose_tun_high(comp *k)           /* 0x2fb0 */
     skip(k);
     if (shape(k->inner) < 2)
         fill(k, 0);
-    seek_kind(k, 4);
-    for (int i = 0; i < 6; i++)
+    if (shape(k->nearer) < 2) {
+        seek_kind(k, 3);
+        skip(k);
         fill(k, 0);
+        fill(k, 0);
+    }
     seek_kind(k, 5);
     fill(k, blockcolor(k->tile));
     if (shape(k->inner) < 4)
@@ -312,24 +321,30 @@ void road_ship(const road_ctx *c, uint8_t *view, const uint8_t *cars, ship_pose_
     }
 }
 
-void road_shadow(const road_ctx *c, uint8_t *view, const sr_play *p, ship_pose_t s)
+int road_shadow_where(const sr_play *p, ship_pose_t s, int *map, int *top, int *left)
 {
     if (s.frame < 0 || p->expl_ctr)
-        return;                           /* render.c: no shadow while exploding */
+        return 0;                         /* render.c: no shadow while exploding */
     int in_tun = sr_in_tunnel(p, p->z, p->x, p->y);
     uint16_t g1 = support(p, p->z, (uint16_t)(p->x - 0x380), in_tun);
     uint16_t g2 = support(p, p->z, (uint16_t)(p->x + 0x380), in_tun);
     uint16_t g = g1 > g2 ? g1 : g2;
     if (!g)
-        return;
+        return 0;
     int clearance = ((int)p->y - (int)g) / 0x80;
     if (clearance < 0)
-        return;
-    int map = clearance / 5;
-    if (map >= 5)
-        return;
+        return 0;
+    *map = clearance / 5;
+    if (*map >= 5)
+        return 0;
+    *left = s.left;
+    *top = s.top + 0x10 + clearance;
+    return 1;
+}
+
+void road_shadow_draw(const road_ctx *c, uint8_t *view, int map, int top, int left)
+{
     const uint8_t *stencil = c->tables + TAB_SHADOW + 261 * map;
-    int left = s.left, top = s.top + 0x10 + clearance;
     /* The stencils are ROW-major, 9 rows of 29: read that way each one is the
      * ship's silhouette seen from above, engine pods and all.  skyroads-port
      * (render.c, renderer.md "29x9 column-major") reads them column by column,
@@ -352,4 +367,69 @@ void road_shadow(const road_ctx *c, uint8_t *view, const sr_play *p, ship_pose_t
                 *q = 0x40;
         }
     }
+}
+
+void road_shadow(const road_ctx *c, uint8_t *view, const sr_play *p, ship_pose_t s)
+{
+    int map, top, left;
+    if (road_shadow_where(p, s, &map, &top, &left))
+        road_shadow_draw(c, view, map, top, left);
+}
+
+/* ---- the ship and shadow for the GPU (road.h, SIN_*) -------------------- */
+
+void road_shadow_masks(uint8_t *dst, const uint8_t *tables)
+{
+    for (int m = 0; m < 5; m++)
+        for (int i = 0; i < 9; i++) {
+            const uint8_t *st = tables + TAB_SHADOW + 261 * m + 29 * i;
+            uint32_t bits = 0;
+            for (int j = 0; j < 29; j++)
+                if (st[j])
+                    bits |= 0x80000000u >> j;
+            st32(dst + 4 * (9 * m + i), bits);
+        }
+}
+
+/* One row's clip long: see SIN_CLIP. */
+static uint32_t clip_long(const road_ctx *c, int y)
+{
+    int lo, hi;
+    if (!cowl_row(c, y, &lo, &hi))
+        return 320u;                      /* A = -1, B = 320: nothing */
+    if (lo < -1) lo = -1;
+    if (hi > 320) hi = 320;
+    return (uint32_t)(lo + 1) << 16 | (uint32_t)hi;
+}
+
+void road_ship_input(uint8_t *sin, const road_ctx *c, const sr_play *p, ship_pose_t s,
+                     uint32_t cars_at, uint32_t masks_at)
+{
+    int map = 0, top = 0, left = 0;
+    int shadow = road_shadow_where(p, s, &map, &top, &left);
+    road_ship_input_at(sin, c, s, shadow, map, top, left, cars_at, masks_at);
+}
+
+void road_ship_input_at(uint8_t *sin, const road_ctx *c, ship_pose_t s,
+                        int shadow, int map, int top, int left,
+                        uint32_t cars_at, uint32_t masks_at)
+{
+    if (s.frame < 0) {
+        st32(sin + SIN_SRC, 0);
+    } else {
+        st32(sin + SIN_SRC, cars_at + CAR_FRAME_BYTES * (uint32_t)s.frame);
+        st32(sin + SIN_ROW0, c->view + (uint32_t)((int32_t)s.top * 320));
+        st32(sin + SIN_LEFT, (uint32_t)(int32_t)s.left);
+        for (int i = 0; i < 24; i++)
+            st32(sin + SIN_CLIP + 4 * i, clip_long(c, s.top + i));
+    }
+    if (!shadow) {
+        st32(sin + SIN_MASK, 0);
+        return;
+    }
+    st32(sin + SIN_MASK, masks_at + 4 * 9 * (uint32_t)map);
+    st32(sin + SIN_SROW0, c->view + (uint32_t)((int32_t)top * 320));
+    st32(sin + SIN_SLEFT, (uint32_t)(int32_t)left);
+    for (int i = 0; i < 9; i++)
+        st32(sin + SIN_SCLIP + 4 * i, clip_long(c, top + i));
 }

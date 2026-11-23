@@ -9,9 +9,10 @@ what road_compose composes; then runs the REAL GPU binary (from build/main.bin,
 located through build/main.lst) in tools/oracle/jrisc.py on a DRAM image laid
 out as on the Jaguar, frame after frame with the registers carried over, up
 to the rasteriser's entry, and compares the two lists and the second
-launch's address.  On every 10th frame it goes on: the first launch's
-rasteriser, then the second launch, over a screen of 0xA5, compared pixel for
-pixel with raster.h's.  Run after build.bat (it needs the build's main.bin,
+launch's address.  On every 10th frame it goes on: list 1, a ship and
+its shadow (SHIP_IN, at poses gpu_frames.c picks), list 2 - all in the same
+launch - over a screen of 0xA5, compared pixel for pixel with raster.h,
+road_ship and road_shadow_draw.  Run after build.bat (it needs the build's main.bin,
 map and cart/).  Exit 1 on the first difference.
 """
 import os
@@ -56,8 +57,8 @@ def main():
     sy = lst_symbols(['GpuRom', 'GpuRomEnd', 'GpuRoad', 'gr_start', 'gr_done'])
     main_bin = open(os.path.join(REPO, 'build', 'main.bin'), 'rb').read()
     code = main_bin[sy['GpuRom']:sy['GpuRomEnd']]
-    if sy['GpuRoad'] != jrisc.G_RAM or (code[0] >> 2) != 38:
-        raise SystemExit('gpu_check: GpuRom does not start with GpuRoad\'s movei')
+    if sy['GpuRoad'] != jrisc.G_RAM or (code[0] >> 2) not in (35, 38):
+        raise SystemExit('gpu_check: GpuRom does not start with GpuRoad (moveq / movei)')
 
     exe = os.path.join(REPO, 'build', 'gpu_frames.exe')
     out = os.path.join(REPO, 'build', 'gpu_frames.bin')
@@ -74,6 +75,18 @@ def main():
     cin_bytes = eq['COMP_WIN'] - eq['COMP_IN'] + eq['COMP_ROWS'] * 32
     cin_at, cmd_at, gpu_cmd = eq['COMP_IN'], eq['CMD_BUF'], eq['GPU_CMD']
     view_at, view_bytes = eq['VIEW0'], eq['VIEW0_SIZE']
+    # the ship's frames and the shadow masks, where the 68000 puts them
+    cars = open(os.path.join(REPO, 'cart', 'cars.bin'), 'rb').read()
+    dram[eq['CARS_BUF']:eq['CARS_BUF'] + len(cars)] = cars
+    tables = open(os.path.join(REPO, 'cart', 'tables.bin'), 'rb').read()
+    masks = bytearray()
+    for m in range(5):
+        for i in range(9):
+            row = tables[296 + 261 * m + 29 * i:296 + 261 * m + 29 * i + 29]
+            masks += sum(0x80000000 >> j for j in range(29) if row[j]).to_bytes(4, 'big')
+    dram[eq['SHADOW_MASKS']:eq['SHADOW_MASKS'] + len(masks)] = masks
+    ship_at = eq['SHIP_IN']
+    sin_bytes = eq['SHIP_SCLIP'] - ship_at + 9 * 4
     gpu = jrisc.Gpu(dram, code)
 
     t0 = time.time()
@@ -109,12 +122,13 @@ def main():
         has_view, = struct.unpack_from('>I', frames, ofs)
         ofs += 4
         if has_view:
+            dram[ship_at:ship_at + sin_bytes] = frames[ofs:ofs + sin_bytes]
+            ofs += sin_bytes
             want_view = frames[ofs:ofs + view_bytes]
             ofs += view_bytes
             dram[view_at:view_at + view_bytes] = bytes([0xA5]) * view_bytes
             try:
-                gpu.run_until(sy['gr_done'])            # launch 1's rasteriser
-                gpu.pc = jrisc.G_RAM                    # launch 2, from GPU_CMD
+                # ONE launch: list 1, the ship and its shadow, list 2
                 gpu.run_until(sy['gr_done'])
             except jrisc.JriscError as e:
                 raise SystemExit(f'gpu_check: road {road} pos {pos} (rasteriser): {e}')

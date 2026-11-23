@@ -61,6 +61,14 @@ CIN_ROWS = 11
 COMP_IN_SIZE = 0x400
 assert CIN['WIN'] + CIN_ROWS * 32 <= COMP_IN_SIZE
 
+# The ship and shadow the GPU draws between the two lists, csrc/road.h SIN_*
+# (road_ship_input; checked in game_main.c): offsets the GPU adds to SHIP_IN.
+SIN = {'SRC': 0, 'ROW0': 4, 'LEFT': 8, 'MASK': 12, 'SROW0': 16, 'SLEFT': 20,
+       'CLIP': 32, 'SCLIP': 32 + 4 * 24}
+SIN_BYTES = SIN['SCLIP'] + 4 * 9
+SHIP_IN_SIZE = 0x100
+assert SIN_BYTES <= SHIP_IN_SIZE
+
 # --- HAL cells: (name, size). Aligned to their size. -------------------------
 HAL_CELLS = [
     ('IRQ_TICK', 4),             # video interrupts since boot
@@ -169,6 +177,11 @@ def dram_regions():
         # The GPU composers' input (csrc/road.h CIN_*): position, colour
         # quads, the grid rows of the frame as longs.
         ('COMP_IN', COMP_IN_SIZE, 8),
+        # The ship and shadow the GPU draws (csrc/road.h SIN_*), every frame.
+        ('SHIP_IN', SHIP_IN_SIZE, 8),
+        # The five shadow stencils as 9 row masks each (road_shadow_masks):
+        # the cartridge's bytes are unaligned for the GPU.
+        ('SHADOW_MASKS', 5 * 9 * 4, 8),
         # The GameDrive's BIOS image, fetched at boot (src/gd.s GdInstall).
         ('GDB_BUF', 0x1000, 8),
     ]
@@ -306,6 +319,8 @@ def main():
         ('OBJ_N', len(OBJECTS), None),
         ('STACK_TOP', regs['STACK'][0] + regs['STACK'][1], None),
     ]
+    for k, v in SIN.items():
+        eq.append(('SHIP_' + k, regs['SHIP_IN'][0] + v, "the GPU's ship input (csrc/road.h SIN_" + k + ")"))
     for k, v in CIN.items():
         eq.append(('COMP_' + k, regs['COMP_IN'][0] + v, "GPU composers' input (csrc/road.h CIN_" + k + ")"))
     eq.append(('COMP_ROWS', CIN_ROWS, None))
