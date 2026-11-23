@@ -139,10 +139,47 @@ heavy scenes. The 68000 is the limit.
 - **Three frame buffers** (`ROAD_VIEW` tells SetView which): with two,
   the frame being drawn was the one still on screen (see the lessons).
 
-Next, in order: ship + shadow on the GPU (~300 half-lines on the 68000;
-aligned-long read-modify-write), the ~120 half-lines of input + ship pose
-(divisions in `ship_pose` / `sr_in_tunnel`), then the hot 32-bit divisions
-in play.c rewritten equivalently - guarded by the tick-for-tick demo check.
+### M3, session 3: the JaguarDocs knowledge base applied, the physics
+
+Measured through COM8 (`tools/comlog.py`: one line a second from the
+Jaguar, `src/gd.s` + `lg_frame` in csrc/game_main.c), which also sees what
+the on-screen numbers cannot: their own cost (~100 half-lines a frame) and
+the time no phase covers.
+
+- **GPU rasteriser** (JaguarDocs hw/01, hw/06): spans filled with `storep`
+  (every DRAM store costs ~4.7 clk whatever its width), the next span word
+  loaded a line ahead (a DRAM load lands ~16 clk later), `G_HIDATA` set
+  after the prefetch has landed (every external load rewrites it). The
+  interpreter models storep and poisons G_HIDATA on every external load.
+  GPU 1 + GPU 2: 187 -> 114 half-lines a frame on the same scene.
+- **68000 waits off the bus**: the poll of GPU_DONE pauses with MULUs (a
+  68000 polling DRAM slows GPU loads ~3x); the VI handler acknowledges
+  first (INT1, then INT2: before it GPU and Blitter cannot touch the bus);
+  OBF written once at boot.
+- **No VI wait per frame**: the handler puts a finished frame on screen
+  itself, the main loop STOPs only when no tick is due, C waits only when a
+  buffer is still shown. Peak 27 -> 33 fps.
+- **The drops were the physics**, not the drawing: on blocks and tunnels a
+  tick cost up to ~700 half-lines (22 ms; 10 fps). `swept_move`'s
+  refinements asked `sr_solid` up to ~50 times a grounded tick, each with a
+  libgcc `__modsi3`, plus 64-bit `__muldi3`/`__divdi3` every tick. play.c
+  now (changes marked `JAG:`): the column phase from a 512-entry table;
+  no probe repeated in the same row (z refine) or column (x refine) -
+  sr_solid sees z only through z >> 16 and x only through x >> 7; 32-bit
+  arithmetic in the coarse sweep. `tools/oracle/play_equiv.c` (build.bat
+  step 2b) runs it against the frozen reference on every road: pure
+  queries, 200,000 random ship states per road, random games, the demo -
+  the whole state equal after every tick (8.7 M ticks); real mutations are
+  caught. Worst demo second 10 -> 29 fps; playing, 33-37 fps throughout,
+  the slide on a tube roof included.
+
+Where a frame goes now (36 fps, the cap: one frame per tick): ship+shadow
+~300, physics ~190, input+pose ~120, GPU ~160, gauges ~46.
+
+Next, in order: ship + shadow on the GPU (~300 half-lines on the 68000);
+the road-start hitch (~1 s at 7-9 fps, 20 ticks dropped: the dashboard
+redrawn from scratch into all three buffers); the ~120 half-lines of input
++ ship pose.
 - **M4 — sound.** SFX through the DSP PCM driver (Keen Dreams, verified on
   hardware), resampled at build time to the I2S rate. Music: **an OPL2
   synthesised on the DSP** (9 channels x 2 operators = 18 FM operators),
@@ -210,5 +247,13 @@ constants inside `play.c` stay where the reimplementation put them.
 - An instrument that draws every frame must be measured too: the timing
   digits cost more than the phases they showed (session 2). Draw once, copy
   with the Blitter.
+- **Measure the 68000 code you did not write before blaming the drawing**
+  (session 3): the drops the eye tied to "how much is on screen" were the
+  physics probing blocks and tunnels; the on-screen averages even hid it
+  (latched seconds, ~2300 half-lines of ticks shown as 338). COM8 lines with
+  a total by the clock leave nothing unaccounted.
+- A `stop` that waits for an interrupt must never run with the interrupts
+  off: frame 1 is drawn by c_init before INT1 is enabled, and an unsigned
+  `k - 2` sent it to sleep for ever (green COL_BOOT screen, session 3).
 - BigPEmu's frame-event script did not run here (no frame ever reached); the
   hardware, with the BG-register stage colours, was the faster instrument.

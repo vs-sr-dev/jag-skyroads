@@ -106,6 +106,16 @@ HAL_CELLS = [
     ('ROAD_SEQ', 4),
     ('ROAD_SHOWN', 4),
     ('GPU_FAIL', 4),             # C only: launches whose DONE never came
+    # Ticks the main loop dropped (backlog beyond MAX_CATCHUP): RMAC only.
+    ('TICK_DROP', 4),
+    # The GameDrive's debug channel (src/gd.s): RMAC only, C reads.
+    ('GD_BIOS', 4),              # the GD BIOS's base in GDB_BUF, 0 = none
+    ('GD_SEND_FN', 4),           # GdSendC for C to call, 0 = nothing is sent
+    ('GD_DROP', 4),              # lines dropped (nobody read the last one)
+    ('GD_TIMEOUT', 4),           # bytes whose exchange ran out of patience
+    ('GD_VER', 4),               # firmware (BCD) << 16 | ASIC
+    ('GD_STATE', 2),             # GdInstall: 0 ok, else where it failed
+    ('GD_PEND', 2),              # the micro's answer to the last line pending
 ]
 
 # --- OP objects, in LIST ORDER = priority (whoever is drawn last wins) -------
@@ -159,6 +169,8 @@ def dram_regions():
         # The GPU composers' input (csrc/road.h CIN_*): position, colour
         # quads, the grid rows of the frame as longs.
         ('COMP_IN', COMP_IN_SIZE, 8),
+        # The GameDrive's BIOS image, fetched at boot (src/gd.s GdInstall).
+        ('GDB_BUF', 0x1000, 8),
     ]
 
 

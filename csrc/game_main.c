@@ -47,9 +47,22 @@ _Static_assert(COMP_POS == COMP_IN + CIN_POS && COMP_BASE == COMP_IN + CIN_BASE
                && CIN_BYTES <= COMP_IN_SIZE,
                "GPU composers' input: csrc/road.h CIN_* vs tools/memory_map.py");
 
-/* Ceiling of the wait for DONE, in polls (about a second).  The wait must
- * never be without an exit: a stuck GPU becomes a number (GPU_FAIL). */
-#define GPU_GUARD 400000u
+/* Ceiling of the wait for DONE, in polls (about a second with the pause
+ * below).  The wait must never be without an exit: a stuck GPU becomes a
+ * number (GPU_FAIL). */
+#define GPU_GUARD 60000u
+
+/* A pause that stays off the bus.  The 68000 polling DRAM in a tight loop
+ * slows the GPU's DRAM loads from 4.8 to 13.8 clk each (JaguarDocs hw/01
+ * s.6.1, T-MEM-13, hardware); three MULUs by $FFFF are ~210 cycles of ALU
+ * with one instruction fetch each, so a poll touches the bus a few times
+ * every ~16 us instead of every few cycles. */
+static inline void bus_pause(void)
+{
+    uint32_t a = 0, b = 0xFFFFu;
+    __asm__ volatile("mulu.w %1,%0\n\tmulu.w %1,%0\n\tmulu.w %1,%0"
+                     : "+d"(a) : "d"(b));
+}
 
 /* JagLBA's Gpu_Run (engine_c/jag_hw.h), verified on hardware:
  *  - DONE cleared and READ BACK: the 68000's writes are posted, and the read
@@ -68,9 +81,11 @@ static int gpu_run(uint32_t entry_pc)
     HW32(G_PC) = entry_pc;
     (void)HW32(G_PC);
     HW32(G_CTRL) = 1;
-    for (uint32_t i = 0; i < GPU_GUARD; i++)
+    for (uint32_t i = 0; i < GPU_GUARD; i++) {
         if (HW32(GPU_DONE))
             return 1;
+        bus_pause();
+    }
     return 0;
 }
 
@@ -98,6 +113,18 @@ static uint32_t pf_tick, pf_fps_count, pf_fps, pf_fps_mark;
 static uint32_t pf_sum[6], pf_shown[7];   /* per-second sums, latched averages */
 static int ovl_dirty;             /* the overlay buffer needs redrawing */
 
+/* ---- LOG: one line a second to COM8 through the GameDrive (src/gd.s) ---
+ * The on-screen numbers cannot see what lies OUTSIDE their phases, nor what
+ * they cost themselves; this can.  Sums over the second, in half-lines:
+ *   T ticks  I input+pose  G gpu1  N ship+shadow  H gpu2  D gauges
+ *   O the overlay (draw + blit)  W wait for a free buffer  L the last line's
+ *   own sending  A the whole second, by the clock  -> A - all = the unseen.
+ * Read on the PC with tools/comlog.py.  Hex, so no division on the 68000. */
+enum { LG_TICK, LG_IN, LG_G1, LG_SHIP, LG_G2, LG_HUD, LG_OVL, LG_WAIT, LG_SEND, LG_N };
+static uint32_t lg_sum[LG_N], lg_frames, lg_ticks, lg_mark, lg_t0, lg_drop0;
+static int lg_started;
+static char lg_line[192];
+
 /* ---- CHECK: an instrument on the KEYPAD (key 9), off by default ---------
  * One question: does the GPU compose, on the real machine, the list
  * road_compose composes?  (The PC answers it for the logic, running the GPU
@@ -107,6 +134,12 @@ static int ovl_dirty;             /* the overlay buffer needs redrawing */
  * address; on screen, third row: frames checked, frames that differed. */
 static int check_on;
 static uint32_t chk_frames, chk_bad;
+
+/* Never backwards: VC can already be past VI while the interrupt that
+ * advances IRQ_TICK has not run yet (masked, or the bus held), and the
+ * reading then falls one frame short; the first COM8 log showed it as
+ * phases of ~65000 half-lines.  Such a reading becomes the last one. */
+static uint32_t clock_last;
 
 static uint32_t clock_hl(void)
 {
@@ -119,7 +152,11 @@ static uint32_t clock_hl(void)
         /* IRQ_TICK advances at VI, not at VC = 0: count from VI */
         uint32_t vi = (uint32_t)(uint16_t)HW16(VI_VAL);
         uint32_t ph = vc >= vi ? vc - vi : vc + hl - vi;
-        return t * hl + ph;
+        uint32_t now = t * hl + ph;
+        if ((int32_t)(now - clock_last) < 0)
+            now = clock_last;
+        clock_last = now;
+        return now;
     }
 }
 
@@ -235,7 +272,7 @@ static void c_tick_inner(void);
 
 void c_tick(void)
 {
-    uint32_t t0 = perf_on ? clock_hl() : 0;
+    uint32_t t0 = clock_hl();
     if (HW16(PAD_KEYS) & ~keys_prev & PADB(KEY_B_0))
         perf_on = !perf_on;
     if (HW16(PAD_KEYS) & ~keys_prev & PADB(KEY_B_9)) {
@@ -245,8 +282,10 @@ void c_tick(void)
     if (HW16(PAD_KEYS) & ~keys_prev & (PADB(KEY_B_0) | PADB(KEY_B_9)))
         ovl_dirty = 1;
     c_tick_inner();
-    if (perf_on)
-        pf_tick += clock_hl() - t0;
+    uint32_t dt = clock_hl() - t0;
+    pf_tick += dt;
+    lg_sum[LG_TICK] += dt;
+    lg_ticks++;
 }
 
 static void c_tick_inner(void)
@@ -424,9 +463,91 @@ static void check_lists(road_ctx *c)
     chk_bad += (uint32_t)bad;
 }
 
+/* Frame k goes into the buffer frame k-3 used.  The video interrupt puts a
+ * finished frame on screen at once (ViHandler), so that buffer is free as
+ * soon as the screen shows k-2 or later; it waits only when a frame took
+ * less than a VI.  At $2700 for the check, then STOP: an interrupt between
+ * the two cannot be slept through. */
+static void wait_shown(uint32_t need)
+{
+    for (;;) {
+        __asm__ volatile("move.w #0x2700,%%sr" ::: "memory");
+        if (HW32(ROAD_SHOWN) >= need)
+            break;
+        __asm__ volatile("stop #0x2000" ::: "memory");
+    }
+    __asm__ volatile("move.w #0x2000,%%sr" ::: "memory");
+}
+
+static char *lg_hex(char *o, char key, uint32_t v, int digits)
+{
+    *o++ = ' ';
+    *o++ = key;
+    *o++ = '=';
+    for (int i = digits - 1; i >= 0; i--)
+        *o++ = "0123456789ABCDEF"[(v >> (4 * i)) & 15];
+    return o;
+}
+
+/* After a frame: once a second, the line.  Its own cost goes into the NEXT
+ * second's L, so A still adds up. */
+static void lg_frame(void)
+{
+    uint32_t now = clock_hl();
+    if (!lg_started) {
+        lg_started = 1;
+        lg_t0 = now;
+        lg_mark = HW32(IRQ_TICK);
+        lg_drop0 = HW32(TICK_DROP);
+        for (int i = 0; i < LG_N; i++)
+            lg_sum[i] = 0;
+        lg_frames = lg_ticks = 0;
+        return;
+    }
+    lg_frames++;
+    if (HW32(IRQ_TICK) - lg_mark < (uint32_t)(uint16_t)HW16(TICK_HZ))
+        return;
+    uint32_t drop = HW32(TICK_DROP);
+    char *o = lg_line;
+    *o++ = 'S';
+    o = lg_hex(o, 'd', HW32(DEMO_TICK), 4);
+    o = lg_hex(o, 'r', (uint32_t)(uint16_t)HW16(CUR_ROAD), 2);
+    o = lg_hex(o, 'm', (uint32_t)(uint16_t)HW16(GAME_MODE), 1);
+    o = lg_hex(o, 'f', lg_frames, 2);
+    o = lg_hex(o, 't', lg_ticks, 2);
+    o = lg_hex(o, 'x', drop - lg_drop0, 2);
+    o = lg_hex(o, 'A', now - lg_t0, 4);
+    static const char keys[LG_N] = { 'T', 'I', 'G', 'N', 'H', 'D', 'O', 'W', 'L' };
+    for (int i = 0; i < LG_N; i++)
+        o = lg_hex(o, keys[i], lg_sum[i], 4);
+    o = lg_hex(o, 'F', HW32(GPU_FAIL), 2);
+    o = lg_hex(o, 'B', HW32(BLIT_STALL), 2);
+    o = lg_hex(o, 'P', HW32(GD_DROP), 2);
+    o = lg_hex(o, 'K', (uint32_t)perf_on | (uint32_t)check_on << 1, 1);
+    *o = 0;
+    for (int i = 0; i < LG_N; i++)
+        lg_sum[i] = 0;
+    lg_frames = lg_ticks = 0;
+    lg_drop0 = drop;
+    lg_mark = HW32(IRQ_TICK);
+    lg_t0 = now;
+    uint32_t fn = HW32(GD_SEND_FN);
+    if (fn) {
+        ((void (*)(const char *))(uintptr_t)fn)(lg_line);
+        lg_sum[LG_SEND] = clock_hl() - now;
+    }
+}
+
 void c_render(void)
 {
     uint32_t k = HW32(ROAD_SEQ) + 1;
+    _Static_assert(N_VIEWS == 3, "wait_shown assumes three frame buffers");
+    /* Frames 1 and 2 have buffers no frame used before; frame 1 is drawn
+     * by c_init with the interrupts still off, where a STOP never wakes
+     * (k - 2 unsigned: the first try hung the boot on COL_BOOT). */
+    uint32_t tw = clock_hl();
+    if (k > 2)
+        wait_shown(k - 2);
     road_ctx c;
     c.trekg = (const uint8_t *)(uintptr_t)TREKG_BUF;
     c.trekg_at = TREKG_BUF;
@@ -438,7 +559,8 @@ void c_render(void)
     uint8_t *view = (uint8_t *)(uintptr_t)c.view;
 
     uint32_t t[6];
-    t[0] = perf_on ? clock_hl() : 0;
+    t[0] = clock_hl();
+    lg_sum[LG_WAIT] += t[0] - tw;
     /* The GPU's input first, on a free bus: during a blit the 68000 barely
      * gets a cycle (with the blit started first this phase measured ~120
      * half-lines, M3, hardware).  0. Then the Blitter restores the viewport
@@ -447,7 +569,7 @@ void c_render(void)
     road_gpu_input((uint8_t *)(uintptr_t)COMP_IN, &play, c.view);
     ship_pose_t s = ship_pose(&play, play.tick, play.on_sticky);
     blit_view(c.view, PRISTINE);
-    t[1] = perf_on ? clock_hl() : 0;
+    t[1] = clock_hl();
 
     /* 1. composers and the records before the ship (GPU); 2. ship and
      * shadow (68000); 3. records after the ship (GPU, from the address the
@@ -457,23 +579,25 @@ void c_render(void)
     gpu_launch();
     if (check_on)
         check_lists(&c);
-    t[2] = perf_on ? clock_hl() : 0;
+    t[2] = clock_hl();
     road_ship(&c, view, (const uint8_t *)(uintptr_t)CARS_BUF, s);
     road_shadow(&c, view, &play, s);
-    t[3] = perf_on ? clock_hl() : 0;
+    t[3] = clock_hl();
     gpu_launch();
-    t[4] = perf_on ? clock_hl() : 0;
+    t[4] = clock_hl();
     hud_update(view, (const uint8_t *)(uintptr_t)PRISTINE,
                (const uint8_t *)(uintptr_t)ROM_HUD, &play, &hud_st[vb]);
-    t[5] = perf_on ? clock_hl() : 0;
+    t[5] = clock_hl();
 
     /* Numbers that change 36 times a second cannot be read off a television
      * (first try): each is the AVERAGE per frame over the last second,
      * latched once a second. */
     pf_fps_count++;
     pf_sum[0] += pf_tick;
-    for (int i = 0; i < 5; i++)
+    for (int i = 0; i < 5; i++) {
         pf_sum[i + 1] += t[i + 1] - t[i];
+        lg_sum[LG_IN + i] += t[i + 1] - t[i];
+    }
     if (HW32(IRQ_TICK) - pf_fps_mark >= (uint32_t)(uint16_t)HW16(TICK_HZ)) {
         pf_fps_mark = HW32(IRQ_TICK);
         pf_fps = pf_fps_count;
@@ -487,14 +611,17 @@ void c_render(void)
     }
     pf_tick = 0;
     if (perf_on || check_on) {
+        uint32_t to = clock_hl();
         if (ovl_dirty) {
             ovl_draw();
             ovl_dirty = 0;
         }
         ovl_blit(c.view);
+        lg_sum[LG_OVL] += clock_hl() - to;
     }
 
     HW32(ROAD_VIEW) = c.view;
     HW32(ROAD_SEQ) = k;
     view_next = vb == N_VIEWS - 1 ? 0 : vb + 1;
+    lg_frame();
 }

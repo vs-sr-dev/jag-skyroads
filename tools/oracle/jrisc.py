@@ -11,6 +11,7 @@ A long access ignores the two low address bits, as the GPU does.
 M32 = 0xFFFFFFFF
 G_RAM = 0xF03000
 B_CMD = 0xF02238
+G_HIDATA = 0xF02118
 
 
 class JriscError(RuntimeError):
@@ -26,15 +27,25 @@ class Gpu:
         self.pc = org
         self.z = self.c = self.n = False
         self.steps = 0
+        self.hidata = 0xBAD0BAD0
+
+    def poison(self, a):
+        # Every external load rewrites G_HIDATA with whatever crossed the bus
+        # (JaguarDocs hw/06, T-GPU-16, hardware).  Here it becomes garbage, so
+        # a storep that relies on a G_HIDATA set before a load fails on the
+        # PC as well.
+        self.hidata = (0xBAD00000 ^ a ^ self.steps) & M32
 
     def rd32(self, a):
         a &= 0xFFFFFC
         if a < 0x200000:
+            self.poison(a)
             return int.from_bytes(self.dram[a:a + 4], 'big')
         if G_RAM <= a < G_RAM + 0x1000:
             o = a - G_RAM
             return int.from_bytes(self.local[o:o + 4], 'big')
         if a == B_CMD:
+            self.poison(a)
             return 1                                    # the Blitter idle
         raise JriscError(f'load from ${a:06X} at ${self.pc - 2:06X}')
 
@@ -45,6 +56,8 @@ class Gpu:
         elif G_RAM <= a < G_RAM + 0x1000:
             o = a - G_RAM
             self.local[o:o + n] = (v & ((1 << 8 * n) - 1)).to_bytes(n, 'big')
+        elif a == G_HIDATA and n == 4:
+            self.hidata = v & M32
         else:
             raise JriscError(f'store to ${a:06X} at ${self.pc - 2:06X}')
 
@@ -139,6 +152,12 @@ class Gpu:
             self.wr(r[s], r[d], 1)
         elif op == 47:                                  # store
             self.wr(r[s] & ~3, r[d], 4)
+        elif op == 48:                                  # storep: G_HIDATA, then the register
+            a = r[s] & ~7
+            if a >= 0x200000:
+                raise JriscError(f'storep outside DRAM at ${self.pc - 2:06X}')
+            self.wr(a, self.hidata, 4)
+            self.wr(a + 4, r[d], 4)
         elif op in (52, 53):                            # jump cc,(Rn) / jr cc,n
             if in_slot:
                 raise JriscError(f'a jump in a delay slot at ${self.pc - 2:06X}')

@@ -85,6 +85,7 @@ gr_start:
     movei   #gr_head, r17
     movei   #gr_cploop, r18
     movei   #gr_nofill, r25
+    movei   #G_HIDATA, r27
 
 gr_next:
     load    (r1), r3
@@ -102,6 +103,18 @@ gr_next:
     nop
 
 ; A record: r3 = its span block {row, lines, (x0<<16|len)...}.
+; A load from DRAM lands ~16 clk after it is issued and the GPU waits for it
+; at the first use (JaguarDocs hw/06 s.12): the header's loads and the first
+; span word go out first, the fill byte is worked out while they travel.
+; r26 is the span word prefetch: read (or r26) before every new load into it,
+; never overwritten unread (TOM 13).
+    or      r26, r26
+    load    (r3), r5
+    addq    #4, r3
+    load    (r3), r6
+    addq    #4, r3
+    load    (r3), r26                   ; the first line's span word
+    addq    #4, r3
     move    r4, r19
     shrq    #8, r19
     move    r4, r23
@@ -112,17 +125,14 @@ gr_next:
     move    r23, r24
     shrq    #16, r24
     or      r24, r23                    ; the fill byte, four times
-    load    (r3), r5
-    addq    #4, r3
-    load    (r3), r6
-    addq    #4, r3
     cmpq    #0, r6
     jump    EQ, (r12)
     nop
 
 gr_line:
-    load    (r3), r7
-    addq    #4, r3
+    move    r26, r7                     ; this line's span word
+    load    (r3), r26                   ; the next line's (past the block's
+    addq    #4, r3                      ; end on the last line: DRAM, unused)
     move    r7, r9
     and     r21, r9
     shrq    #16, r7
@@ -142,13 +152,15 @@ gr_left:
     cmpq    #0, r9
     jump    EQ, (r25)
     nop
-; A span: bytes up to a long boundary, then longs, then the last bytes.
-; Byte by byte it cost the GPU 100-250 half-lines a launch on the near road
-; (M3, hardware); a long store is one bus write for four pixels.
+; A span: bytes up to a long boundary, a long up to a phrase boundary, then
+; PHRASES, then a long and the last bytes.  Byte by byte it cost the GPU
+; 100-250 half-lines a launch on the near road (M3, hardware); every store to
+; DRAM costs ~4.7 clk whatever its width, so storep carries 8 pixels in the
+; time a long carries 4 (JaguarDocs hw/01 s.6.1, T-MEM-13).
 gr_head:
     moveq   #3, r24
     and     r10, r24
-    jr      EQ, gr_body
+    jr      EQ, gr_long0
     nop
     storeb  r4, (r10)
     addq    #1, r10
@@ -157,18 +169,39 @@ gr_head:
     nop
     jump    T, (r25)
     nop
+gr_long0:
+    btst    #2, r10
+    jr      EQ, gr_body                 ; already on a phrase
+    nop
+    cmpq    #4, r9
+    jr      MI, gr_tail                 ; under 4 left: bytes only
+    nop
+    store   r23, (r10)
+    addq    #4, r10
+    subq    #4, r9
+; storep's high long comes from G_HIDATA, which EVERY external load rewrites
+; (errata TOM 16, seen on hardware): set it after the prefetch has landed,
+; and no external load until the phrases are out.
 gr_body:
+    or      r26, r26                    ; waits for the prefetch
+    store   r23, (r27)                  ; G_HIDATA
     move    r9, r24
-    shrq    #2, r24
+    shrq    #3, r24
     jr      EQ, gr_tail
     nop
 gr_bodyloop:
-    store   r23, (r10)
-    addq    #4, r10
+    storep  r23, (r10)
+    addq    #8, r10
     subq    #1, r24
     jr      NE, gr_bodyloop
     nop
 gr_tail:
+    btst    #2, r9
+    jr      EQ, gr_tailb
+    nop
+    store   r23, (r10)
+    addq    #4, r10
+gr_tailb:
     moveq   #3, r24
     and     r24, r9
     jr      EQ, gr_nofill

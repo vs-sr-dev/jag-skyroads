@@ -38,6 +38,18 @@ if errorlevel 1 (echo ORACLE BUILD ERROR & exit /b 1)
 build\demo_oracle.exe cart
 if errorlevel 1 (echo ORACLE: THE DEMO DOES NOT COMPLETE & exit /b 1)
 
+rem csrc/port/play.c carries changes for the 68000 (marked JAG:); the
+rem reference is skyroads-port's as frozen in ref/.  Every road, random ship
+rem states and games, the demo: the whole state equal after every tick.
+echo [2b] play.c against the reference, tick by tick
+set "REFREN=-Dsr_play_init=ref_sr_play_init -Dsr_play_tick=ref_sr_play_tick -Dsr_play_input=ref_sr_play_input -Dsr_tile_at=ref_sr_tile_at -Dsr_solid=ref_sr_solid -Dsr_in_tunnel=ref_sr_in_tunnel -Dsr_blocktop=ref_sr_blocktop -Dsr_tun_inner=ref_sr_tun_inner -Dsr_tun_outer=ref_sr_tun_outer"
+gcc -std=c11 -O2 -c %REFREN% -o build\ref_play.o ref\skyroads-port-main\src\core\play.c
+if errorlevel 1 (echo REFERENCE BUILD ERROR & exit /b 1)
+gcc -std=c11 -O2 -Wall -Wextra -o build\play_equiv.exe tools\oracle\play_equiv.c csrc\port\play.c build\ref_play.o
+if errorlevel 1 (echo EQUIVALENCE BUILD ERROR & exit /b 1)
+build\play_equiv.exe cart 400
+if errorlevel 1 (echo PLAY.C DIFFERS FROM THE REFERENCE & exit /b 1)
+
 echo [3/8] memory map
 "%PY%" tools\memory_map.py
 if errorlevel 1 (echo MEMORY MAP ERROR & exit /b 1)

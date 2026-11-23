@@ -1,6 +1,24 @@
 #include "play.h"
 #include <string.h>
 
+/* JagSkyroads: skyroads-port's play.c (frozen in ref/), with changes for the
+ * 68000 that keep the physics bit for bit - each marked "JAG:".  The proof
+ * is tools/oracle/play_equiv.c, which runs this file against the reference
+ * tick by tick on every road and on the demo (build.bat).  The facts they
+ * rest on:
+ *   - sr_tile_at reads x only through x >> 7 and z only through z >> 16;
+ *     sr_solid's offsets (0x700, 0x1700) are multiples of 0x80, so sr_solid
+ *     and sr_in_tunnel too depend on x >> 7, z >> 16 and y alone;
+ *   - the column phase t = 0x17 - ((x/0x80 - 0x31) % 0x2e) is a function of
+ *     x >> 7: a 512-entry table, no division (it was a libgcc __modsi3);
+ *   - in swept_move's refinements only one coordinate moves, so a probe
+ *     whose row (z) or column (x) did not change has the same answer as the
+ *     last one: it is not asked again (up to ~50 probes a grounded tick);
+ *   - the coarse sweep's 64-bit products fit 32 bits for the moves a tick
+ *     makes (|dz| < 2^31/5): 32-bit arithmetic there, 64-bit otherwise. */
+static void col_phase_init(void);
+static int col_phase_ready;
+
 /* Data tables from the EXE data segment (verified re/image.bin). */
 const uint16_t sr_blocktop[6] = { 0x2800, 0x3200, 0x3200, 0x3200, 0x3c00, 0x3c00 };
 const uint16_t sr_tun_inner[38] = {
@@ -18,6 +36,8 @@ void sr_play_init(sr_play *p, const sr_road *road,
                   const uint8_t *demo, size_t demo_size)
 {
     memset(p, 0, sizeof *p);
+    if (!col_phase_ready)
+        col_phase_init();                               /* JAG */
     p->road = road;
     p->demo = demo;
     p->demo_size = demo_size;
@@ -68,6 +88,17 @@ static int solid_block(uint16_t tile, int16_t t, uint16_t y)
     }
 }
 
+/* JAG: t = 0x17 - ((x/0x80 - 0x31) % 0x2e) for every x >> 7, C's truncating
+ * % included (negative for x < 0x1880); built once. */
+static int8_t col_phase[512];
+
+static void col_phase_init(void)
+{
+    for (int c = 0; c < 512; c++)
+        col_phase[c] = (int8_t)(0x17 - ((c - 0x31) % 0x2e));
+    col_phase_ready = 1;
+}
+
 /* ---- fn_1685: point solidity (ship half-width 0x700) ------------------ */
 int sr_solid(const sr_play *p, uint32_t z, uint16_t x, uint16_t y)
 {
@@ -82,7 +113,7 @@ int sr_solid(const sr_play *p, uint32_t z, uint16_t x, uint16_t y)
     if (!(left & 0xf00) && !(right & 0xf00))
         return 0;
     uint16_t center = sr_tile_at(p, z, x);
-    int16_t t = (int16_t)(0x17 - ((x / 0x80 - 0x31) % 0x2e));
+    int16_t t = col_phase[x >> 7];                      /* JAG: was % 0x2e */
     int16_t xoff = -0x1700;
     if (t <= 0) {
         t = (int16_t)(1 - t);
@@ -102,7 +133,7 @@ int sr_in_tunnel(const sr_play *p, uint32_t z, uint16_t x, uint16_t y)
     uint16_t bt = tile & 0xf00;
     if (bt != 0x100 && bt != 0x300 && bt != 0x500)
         return 0;
-    int16_t t = (int16_t)(0x17 - ((x / 0x80 - 0x31) % 0x2e));
+    int16_t t = col_phase[x >> 7];                      /* JAG: was % 0x2e */
     if (t <= 0)
         t = (int16_t)(1 - t);
     if ((uint16_t)t > 0x25)
@@ -121,41 +152,59 @@ static void swept_move(sr_play *p, uint32_t nz, uint16_t nx, uint16_t ny)
     int16_t dy = (int16_t)(ny - p->y);
 
     /* coarse 5-step sweep */
+    /* JAG: dz * 5 fits 32 bits for any move a tick makes; the 64-bit
+     * product and quotient were libgcc's __muldi3 / __divdi3 every tick. */
+    const int narrow = dz > -0x19999999 && dz < 0x19999999;
     int si = 1;
     for (; si <= 5; si++) {
-        uint32_t tz = p->z + (uint32_t)((int64_t)dz * si / 5);
+        uint32_t tz = p->z + (narrow ? (uint32_t)(dz * si / 5)
+                                     : (uint32_t)((int64_t)dz * si / 5));
         uint16_t tx = (uint16_t)(p->x + dx * si / 5);
         uint16_t ty = (uint16_t)(p->y + dy * si / 5);
         if (sr_solid(p, tz, tx, ty))
             break;
     }
     int safe = si - 1;
-    p->z += (uint32_t)((int64_t)dz * safe / 5);
+    p->z += narrow ? (uint32_t)(dz * safe / 5) : (uint32_t)((int64_t)dz * safe / 5);
     p->x = (uint16_t)(p->x + dx * safe / 5);
     p->y = (uint16_t)(p->y + dy * safe / 5);
     if (si > 5)
         return;                              /* full move applied */
 
     /* z refine: step 0x1000 then /16 down to 1 */
+    /* JAG: x and y stay put here, and sr_solid sees z only through its row:
+     * a probe in the row asked last has the same answer. */
+    uint32_t memo_row = 0xffffffffu;
+    int memo_solid = 0;
     for (int32_t step = 0x1000; step > 0; step /= 0x10) {
         while (1) {
             int32_t remaining = (int32_t)(nz - p->z);
             if (dz >= 0 ? (remaining < step) : (remaining > -step))
                 break;
             uint32_t tz = p->z + (uint32_t)(dz >= 0 ? step : -step);
-            if (sr_solid(p, tz, p->x, p->y))
+            if ((tz >> 16) != memo_row) {
+                memo_row = tz >> 16;
+                memo_solid = sr_solid(p, tz, p->x, p->y);
+            }
+            if (memo_solid)
                 break;
             p->z = tz;
         }
     }
     /* x refine: step 0x7d then /5 */
+    /* JAG: z and y stay put here, and sr_solid sees x only through x >> 7. */
+    int memo_col = -1;
     for (int16_t step = 0x7d; step > 0; step /= 5) {
         while (1) {
             int16_t remaining = (int16_t)(nx - p->x);
             if (dx >= 0 ? (remaining < step) : (remaining > -step))
                 break;
             uint16_t tx = (uint16_t)(p->x + (dx >= 0 ? step : -step));
-            if (sr_solid(p, p->z, tx, p->y))
+            if ((tx >> 7) != memo_col) {
+                memo_col = tx >> 7;
+                memo_solid = sr_solid(p, p->z, tx, p->y);
+            }
+            if (memo_solid)
                 break;
             p->x = tx;
         }

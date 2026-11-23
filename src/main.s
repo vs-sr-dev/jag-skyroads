@@ -217,6 +217,7 @@ Start:
     move.l  #BM_START, BOOT_MARK
 
     bsr     InitVectors
+    bsr     GdInstall                       ; COM8 log, or nothing (src/gd.s)
     bsr     InitVideoTiming
     bsr     VideoOnMinimal
     bsr     LockVi
@@ -265,12 +266,20 @@ Start:
 ; against 60 (NTSC) or 50 (PAL) frames, i.e. most frames run one tick and
 ; some none.  A backlog beyond MAX_CATCHUP is dropped rather than chased.
 ;---------------------------------------------------------------------------
+; No wait for the next video interrupt after a frame: that idle half a VI
+; per frame on average was counted by no phase.  The handler puts each new
+; frame on screen (ViHandler); here the 68000 STOPs only when no tick is
+; due, off the bus.  The check runs at $2700 so a tick counted between it
+; and STOP cannot be slept through: STOP lowers the mask and waits in one.
 MainLoop:
-    move.l  IRQ_TICK, d5
-.ml_sync:
-    move.l  IRQ_TICK, d0
-    cmp.l   d5, d0
-    beq.s   .ml_sync
+    move.w  #$2700, sr
+    move.l  GAME_TICKS, d6
+    cmp.l   GAME_DONE, d6
+    bne.s   .ml_go
+    stop    #$2000
+    bra.s   MainLoop
+.ml_go:
+    move.w  #$2000, sr
 
     .if BG_PROBE=1
     bsr     BgProbe
@@ -278,10 +287,6 @@ MainLoop:
     move.w  #COL_BLACK, BG
     .endif
 
-; The frame C finished last goes on screen here, right after the interrupt,
-; the furthest point from the next one: the handler never copies a
-; half-written object.
-    bsr     SetView
     bsr     ReadPad
 
     move.l  GAME_TICKS, d6
@@ -289,6 +294,8 @@ MainLoop:
     sub.l   GAME_DONE, d0
     cmpi.l  #MAX_CATCHUP, d0
     bls.s   .ml_tick
+    subq.l  #MAX_CATCHUP, d0
+    add.l   d0, TICK_DROP                   ; for the COM8 log
     move.l  d6, d0
     subq.l  #MAX_CATCHUP, d0
     move.l  d0, GAME_DONE
@@ -312,7 +319,7 @@ MainLoop:
 ;---------------------------------------------------------------------------
 ; SetView: the game screen's object on the frame buffer of frame ROAD_SEQ
 ; (written by C when its frame is complete: pristine screen, road, ship,
-; shadow, gauges).
+; shadow, gauges).  Called once at boot, then only by ViHandler.
 ; ROAD_SHOWN is this routine's own copy: one writer per cell.
 ;---------------------------------------------------------------------------
 SetView:
@@ -610,6 +617,10 @@ VideoOnMinimal:
     move.l  #OP_STOP, d0
     swap    d0
     move.l  d0, OLP
+; One write to OBF: an OP left waiting on a GPU object by the previous ROM
+; stays stopped through the GameDrive's reboot and a new RUN, and only this
+; frees it (JaguarDocs hw/04 rule 13, hardware).
+    move.w  #0, OBF
     move.w  #COL_BOOT, BG
     move.w  #VIDEN|BGEN|PWIDTH4|RGB16|CSYNC, VMODE
     rts
@@ -799,9 +810,15 @@ MakeObj:
     rts
 
 ;---------------------------------------------------------------------------
-; ViHandler: count, re-arm the list, acknowledge (C_VIDCLR + INT2).
+; ViHandler: acknowledge (C_VIDCLR, then INT2), count, re-arm the list.
+; The acknowledge comes FIRST: while an interrupt is applied and INT2 is not
+; written the 68000 sits above the GPU and the Blitter on the bus, and their
+; external accesses wait for as long as it runs (JaguarDocs hw/01 rule 7,
+; T-INT-07, hardware).  Clear in INT1 before INT2, or ihandler stays high.
 ;---------------------------------------------------------------------------
 ViHandler:
+    move.w  #INT1_ENA|C_VIDCLR, INT1
+    move.w  #0, INT2
     move.l  d0, -(sp)
     addq.l  #1, IRQ_TICK
     move.l  TICK_ACC, d0
@@ -812,10 +829,17 @@ ViHandler:
     addq.l  #1, GAME_TICKS
 .vh_acc:
     move.l  d0, TICK_ACC
+; A frame C has finished since the last interrupt goes on screen now: the
+; shadow is updated BEFORE it is copied, so the swap takes effect on this
+; very field (with SetView in the main loop it took one VI more).  C writes
+; ROAD_VIEW before ROAD_SEQ and cannot run in here.
+    move.l  ROAD_SEQ, d0
+    cmp.l   ROAD_SHOWN, d0
+    beq.s   .vh_same
+    bsr     SetView
+.vh_same:
     move.l  (sp)+, d0
     bsr     ArmObjects
-    move.w  #INT1_ENA|C_VIDCLR, INT1
-    move.w  #0, INT2
     rte
 
 ;---------------------------------------------------------------------------
@@ -830,6 +854,8 @@ LoadTrek:
     bsr     Copy32
     movem.l (sp)+, d0/a0-a1
     rts
+
+    .include "src/gd.s"
 
 ; The GPU's code: its own section and .org, so it goes LAST.
     .include "src/gpu_road.s"
