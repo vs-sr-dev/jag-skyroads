@@ -562,7 +562,7 @@ def main(argv):
     write('demo.bin', pad8(struct.pack('>I', len(demo)) + demo))
 
     # --- sound: the songs as OPL2 streams, the effects at Jerry's rate -------
-    write('muzax.bin', pad8(muzax.build_blob(src.read('MUZAX.LZS'))))
+    write('muzax.bin', pad8(muzax.build_blob(src.read('MUZAX.LZS'), src.read('SKYROADS.EXE'))))
     write('sfx.bin', sfx_blob(src))
 
     # --- previews: what the Jaguar should show, from the blobs ------------------

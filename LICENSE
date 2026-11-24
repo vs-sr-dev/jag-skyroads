@@ -1,0 +1,32 @@
+MIT License
+
+Copyright (c) 2026 Samuele Voltan
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+-------------------------------------------------------------------------------
+Parts that are not ours keep their own terms:
+
+- csrc/port/ (play.c, play.h, sr.h, assets.h) is skyroads-port's code, MIT
+  License, Copyright (c) 2026 Ammaar Reshi: csrc/port/LICENSE-skyroads-port.txt.
+  tools/lzs.py follows its decompressor (attribution in the file).
+- src/eeprom.s is Atari's EEPROM routines (Dave Staugas, Atari Corp., 1993),
+  distributed to Jaguar developers.
+- SkyRoads itself, and everything the build converts, is Bluemoon
+  Interactive's and is not in this repository.

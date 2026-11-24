@@ -33,7 +33,7 @@ REPO = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, HERE)
 import jrisc  # noqa: E402
 
-MINGW = r'C:\msys64\mingw64\bin'
+MINGW = os.environ.get('MINGW', r'C:\msys64\mingw64\bin')   # build.bat's, else this machine's
 
 
 def map_inc():

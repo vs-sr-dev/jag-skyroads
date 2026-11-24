@@ -29,7 +29,7 @@ sys.path.insert(0, os.path.join(REPO, 'tools'))
 import muzax  # noqa: E402
 import srdata  # noqa: E402
 
-MINGW = r'C:\msys64\mingw64\bin'
+MINGW = os.environ.get('MINGW', r'C:\msys64\mingw64\bin')   # build.bat's, else this machine's
 
 
 def default_source():
@@ -46,6 +46,7 @@ def main():
     ticks = int(args.pop()) if args and args[-1].isdigit() else 45000
     src = srdata.Source(args[0] if args else default_source())
     data = src.read('MUZAX.LZS')
+    muzax.use_exe(src.read('SKYROADS.EXE'))
     build = os.path.join(REPO, 'build')
     os.makedirs(build, exist_ok=True)
     lzs_path = os.path.join(build, 'muzax.lzs')

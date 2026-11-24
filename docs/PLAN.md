@@ -364,3 +364,6 @@ constants inside `play.c` stay where the reimplementation put them.
   and can wedge until a power-off: 1.5 s pause.  No red LED for USB saves.
 - BigPEmu's frame-event script did not run here (no frame ever reached); the
   hardware, with the BG-register stage colours, was the faster instrument.
+  BigPEmu is high-level emulation: the hardware is the reference, and what
+  works there and not on BigPEmu is BigPEmu's problem.  Its tools were
+  removed (session 5).

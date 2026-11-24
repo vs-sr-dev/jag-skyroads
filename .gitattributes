@@ -1,0 +1,5 @@
+# Line endings fixed by type, whatever core.autocrlf says: the shell script
+# runs inside a Linux container (sh rejects "set -e" followed by a CR), the
+# batch file under cmd.
+*.sh  text eol=lf
+*.bat text eol=crlf

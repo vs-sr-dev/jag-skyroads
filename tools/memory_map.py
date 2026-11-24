@@ -254,7 +254,8 @@ def cart_blob_size(fn):
     return align(os.path.getsize(path), 32)
 
 
-JAGUAR_INC = r'D:\Homebrew\Jaguar\include\jaguar.inc'
+# Atari's jaguar.inc: build.bat's JAGINC (the folder), else this machine's.
+JAGUAR_INC = os.path.join(os.environ.get('JAGINC', r'D:\Homebrew\Jaguar\include'), 'jaguar.inc')
 # Atari's names the C side needs, exported as JAG_<name>: read from
 # jaguar.inc itself, so there is no second, hand-written copy of them.
 JAG_NAMES = ['A1_BASE', 'A1_FLAGS', 'A1_CLIP', 'A1_PIXEL', 'A1_STEP',

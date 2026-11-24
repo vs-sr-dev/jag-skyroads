@@ -32,21 +32,38 @@ What the original does around a song, kept here:
 """
 import struct
 
-# Driver tables (EXE data segment; audio_misc.md 2.4-2.6).
-REG_GROUP = [0x20, 0x40, 0x60, 0x80, 0xE0, 0x20, 0x40, 0x60, 0x80, 0xE0, 0xC0]   # ds:0xc1c
-OP1 = [0x00, 0x01, 0x02, 0x08, 0x09, 0x0A, 0x10, 0x14, 0x12, 0x15, 0x11]         # ds:0xc27
-OP2 = [0x03, 0x04, 0x05, 0x0B, 0x0C, 0x0D, 0x13, 0xFF, 0xFF, 0xFF, 0xFF]         # ds:0xc32
-C0IDX = [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0xFF, 0x08, 0xFF]       # ds:0xc3d
-VOLTAB = [0x3F, 0x14, 0x10, 0x0E, 0x0C, 0x0A, 0x09, 0x08, 0x07, 0x06, 0x06, 0x05, 0x05,
-          0x04, 0x04, 0x04, 0x04, 0x04, 0x03, 0x03, 0x03, 0x03, 0x02, 0x02, 0x02, 0x01,
-          0x01, 0x01, 0x01, 0x00, 0x00]                                           # ds:0xc48
-FNUM_LO = [0xAC, 0xB6, 0xC1, 0xCD, 0xD9, 0xE6, 0xF3, 0x02, 0x11, 0x22, 0x33, 0x45]  # ds:0xc77
-FNUM_HI = [0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1]                                    # ds:0xc83
-PERC_PATCH = bytes.fromhex(                                                       # ds:0xc90
-    '0c00f8b500' '0000d64f00' '01'
-    '0400f7b500' '0000d64f00' '01'
-    '0100f5b500' '0000d64f00' '01'
-    '0100f7b500' '4e00100000' '01')
+# Driver tables, from the user's SKYROADS.EXE (data segment; audio_misc.md
+# 2.4-2.6): Bluemoon's data, never written here - use_exe() fills them in,
+# as tools/srdata.py exe_tables does for the renderer's.
+REG_GROUP = OP1 = OP2 = C0IDX = VOLTAB = FNUM_LO = FNUM_HI = PERC_PATCH = None
+EXE_TABLES = (                  # name, ds: address, bytes
+    ('REG_GROUP', 0xC1C, 11),   # register group per instrument byte
+    ('OP1', 0xC27, 11),         # operator offsets per logical channel
+    ('OP2', 0xC32, 11),
+    ('C0IDX', 0xC3D, 11),       # physical channel per logical one
+    ('VOLTAB', 0xC48, 31),      # attenuation per volume step
+    ('FNUM_LO', 0xC77, 12),     # F-number per semitone
+    ('FNUM_HI', 0xC83, 12),
+    ('PERC_PATCH', 0xC90, 44),  # the four default percussion patches
+)
+
+
+def use_exe(exe):
+    """The driver's tables out of SKYROADS.EXE's bytes.  Call before anything
+    else here; tools/srdata.py exe_tables has already checked the EXE's
+    version by its signatures."""
+    import srdata
+    g = globals()
+    for name, ds, n in EXE_TABLES:
+        b = exe[srdata.EXE_DS + ds:srdata.EXE_DS + ds + n]
+        if len(b) != n:
+            raise SystemExit("SKYROADS.EXE: the MUZAX driver's tables are not there")
+        g[name] = bytes(b) if name == 'PERC_PATCH' else list(b)
+    # Sanity on what OPL2 itself fixes: 11 logical channels over 9 physical
+    # ones, F-numbers rising within the octave.
+    if sorted(c for c in C0IDX if c != 0xFF) != list(range(9)) or             any((FNUM_HI[k] << 8 | FNUM_LO[k]) >= (FNUM_HI[k + 1] << 8 | FNUM_LO[k + 1]) for k in range(11)):
+        raise SystemExit("SKYROADS.EXE: the MUZAX driver's tables do not look right")
+
 
 IDLE_DELAY = 255          # ds:0xcbc: 06 00 | 00 ff | 05 00
 LOOP = 0xFF00
@@ -270,7 +287,7 @@ def stream_with_idle(writes):
     return encode(entries), loop_at * 2
 
 
-def build_blob(muzax_lzs):
+def build_blob(muzax_lzs, exe):
     """cart/muzax.bin: the streams Jerry plays (src/dsp_audio.s).
 
         u32 n                      streams: INIT, song 0..13, SILENCE
@@ -280,6 +297,7 @@ def build_blob(muzax_lzs):
     INIT is the driver's boot init (0x58b1), played once at power-up;
     SILENCE is music_start's reset with no song after it (sound off).
     """
+    use_exe(exe)
     streams = [stream_with_idle(init_writes())]
     for song, n_instr in load_songs(muzax_lzs):
         streams.append(song_stream(song, n_instr))

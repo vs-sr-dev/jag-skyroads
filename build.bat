@@ -11,18 +11,21 @@ rem the blobs' real sizes; then the CHECKS; then whatever compiles against them.
 rem ==========================================================================
 setlocal
 
+rem Tool locations: RMAC, JAGINC (the folder with Atari's jaguar.inc) and
+rem MINGW (its bin) may be set beforehand; these defaults are this machine's.
+
 rem Python is resolved BEFORE MinGW goes on the PATH: mingw64\bin carries its
 rem own python.exe, without our packages.
 for /f "delims=" %%P in ('where python 2^>nul') do if not defined PY set "PY=%%P"
 if not defined PY (echo PYTHON not found on PATH & exit /b 1)
 
-set "RMAC=D:\Homebrew\Jaguar\tools\rmac.exe"
+if not defined RMAC set "RMAC=D:\Homebrew\Jaguar\tools\rmac.exe"
 if not exist "%RMAC%" (echo RMAC not found at %RMAC% & exit /b 1)
-set "JAGINC=D:\Homebrew\Jaguar\include"
+if not defined JAGINC set "JAGINC=D:\Homebrew\Jaguar\include"
 
 rem mingw64\bin FIRST: cc1.exe loads its DLLs from the PATH, and another
 rem libwinpthread-1.dll earlier on it makes cc1 die with no message.
-set "MINGW=C:\msys64\mingw64\bin"
+if not defined MINGW set "MINGW=C:\msys64\mingw64\bin"
 if not exist "%MINGW%\gcc.exe" (echo MinGW gcc not found at %MINGW% & exit /b 1)
 set "PATH=%MINGW%;%PATH%"
 
@@ -37,6 +40,15 @@ gcc -std=c11 -O2 -Wall -Wextra -o build\demo_oracle.exe tools\oracle\demo_oracle
 if errorlevel 1 (echo ORACLE BUILD ERROR & exit /b 1)
 build\demo_oracle.exe cart
 if errorlevel 1 (echo ORACLE: THE DEMO DOES NOT COMPLETE & exit /b 1)
+
+rem 2b and 2c compare with skyroads-port itself, frozen at d865dfe1 and
+rem unpacked into ref\skyroads-port-main (github.com/ammaarreshi/skyroads-port,
+rem MIT; not part of this repository).  Developer checks: without ref\ they
+rem are skipped, the cartridge does not depend on them.
+if exist ref\skyroads-port-main\src\core\play.c goto :refchecks
+echo [2b/2c] skipped: no ref\skyroads-port-main (skyroads-port at d865dfe1)
+goto :refdone
+:refchecks
 
 rem csrc/port/play.c carries changes for the 68000 (marked JAG:); the
 rem reference is skyroads-port's as frozen in ref/.  Every road, random ship
@@ -55,6 +67,7 @@ rem driver, tick by tick (corrected for its one-tick-late delays).
 echo [2c] MUZAX streams vs skyroads-port's driver
 "%PY%" tools\oracle\muzax_check.py %1 2000
 if errorlevel 1 (echo MUZAX STREAMS DIFFER & exit /b 1)
+:refdone
 
 echo [3/8] memory map, OPL2 tables
 "%PY%" tools\memory_map.py
