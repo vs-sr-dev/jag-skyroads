@@ -17,10 +17,11 @@ The VGA DAC is 6 bits per channel, so green keeps all of its precision and red
 and blue lose their lowest bit.
 
 Blobs:
-  game_clut.bin  31 full 256-entry CLUTs, one per road: road palette (0..71),
-                 cars (72..91), dashboard (92..141), the road's world
-                 (142..255).  Composed HERE so the 68000 copies 512 bytes and
-                 knows nothing about palette bases.
+  game_pal.bin   31 full 256-entry palettes, one per road, 6-bit VGA r, g, b:
+                 road palette (0..71), cars (72..91), dashboard (92..141), the
+                 road's world (142..255).  Composed HERE so the 68000 knows
+                 nothing about palette bases; it fades them as the original
+                 (fn_4315) and converts them to Jaguar RGB16 (csrc/front.c).
   worlds.bin     10 backdrops, 320x138, pixels already rebased (+142).
   dash.bin       the dashboard, 320x71, rebased (+92).
   cars.bin       77 ship/explosion frames, 32x24 row-major (the strip is
@@ -34,6 +35,8 @@ Blobs:
                  Jerry plays through its synthesised OPL2 (src/dsp_audio.s).
   sfx.bin        SFX.SND's five effects and INTRO.SND, resampled to Jerry's
                  rate (tools/opl2.py FS), signed 8-bit (see sfx_blob).
+  front.bin      the intro, the menus and the road map: pictures rebased as
+                 the original's loader does, colour maps (see front_blob).
 """
 import os
 import struct
@@ -41,6 +44,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import srdata as sd
+from lzs import Stream, decompress
 import muzax
 import opl2
 
@@ -285,6 +289,170 @@ def sfx_blob(src):
     return bytes(table + data)
 
 
+# --- front.bin: the intro, the menus, the road map ----------------------------
+#
+# What the original loads for its screens (EXE fn_4575 intro, fn_4e36 main
+# menu, fn_4c04 settings, fn_4dac help, fn_5164 road map), each picture
+# REBASED by the colour base the LOADER passes (read_pict 0x4068: VGA adds it
+# to every non-zero pixel), each colour map with the base it is loaded at.
+# The order below is csrc/front.h's P_* / C_* enums: change both together
+# (front.bin carries the counts and the C side checks them).
+#
+#   u32 'FRNT', u32 n_pics, u32 n_cmaps, u32 n_anim
+#   n_pics  x { u16 screen_ofs, u16 w, u16 h, u16 0, u32 pixels }   rows of w
+#   n_cmaps x { u16 base, u16 count, u32 rgb }    count x (r, g, b), 6 bits
+#   n_anim  x { u16 frame, u16 picture }          ANIM.LZS's records in order
+# Offsets from the blob's start; pixels start on a phrase.
+FRONT_MAGIC = 0x46524E54
+INTRO_SCENES = 7
+
+
+def front_blob(src):
+    pics, cmaps, anim = [], [], []
+
+    def pict(p, base):
+        ofs, w, h, px = p
+        pics.append((ofs, w, h, sd.rebase(px, base)))
+
+    def cmap(c, base):
+        if base + len(c) > 256:
+            raise SystemExit(f"a colour map of {len(c)} at {base} runs past 255")
+        cmaps.append((base, c))
+
+    # INTRO.LZS in the order fn_4575 reads it: A @0, title @0, B @$32,
+    # C @$32, logo @$32, then 7 x (E @$A0, G @$A0, scene @$A0)
+    items = list(sd.walk_gfx(src.read('INTRO.LZS')))
+    kinds = ''.join('c' if it[0] == 'cmap' else 'p' for it in items)
+    # (the file holds an eighth triple the loop at 0x461D never reaches)
+    if not kinds.startswith('cpccp' + 'ccp' * INTRO_SCENES):
+        raise SystemExit(f"INTRO.LZS: unexpected chunk sequence {kinds}")
+    cmap(items[0][1], 0)
+    pict(items[1][1:], 0)
+    cmap(items[2][1], 0x32)
+    cmap(items[3][1], 0x32)
+    pict(items[4][1:], 0x32)
+    for k in range(INTRO_SCENES):
+        e, g, p = items[5 + 3 * k:8 + 3 * k]
+        cmap(e[1], 0xA0)
+        cmap(g[1], 0xA0)
+        pict(p[1:], 0xA0)
+    # P order wanted: title, logo, scenes; C order: A, B, C, E0..6, G0..6.
+    # Re-sort what was appended in file order.
+    p_title, p_logo, p_scene = pics[0], pics[1], pics[2:]
+    c_a, c_b, c_c = cmaps[0], cmaps[1], cmaps[2]
+    c_e, c_g = cmaps[3::2], cmaps[4::2]
+    pics[:] = [p_title, p_logo] + p_scene
+    cmaps[:] = [c_a, c_b, c_c] + c_e + c_g
+
+    # MAINMENU.LZS: colour map @$BE, three boxes @$BE (fn_4e36)
+    (c,), boxes = sd.load_gfx(src, 'MAINMENU.LZS')
+    if len(boxes) != 3:
+        raise SystemExit("MAINMENU.LZS: expected 3 pictures")
+    cmap(c, 0xBE)
+    for p in boxes:
+        pict(p, 0xBE)
+
+    # SETMENU.LZS: map @$C8, background @$C8, map @$FA, 10 items @$FA (fn_4c04)
+    items = list(sd.walk_gfx(src.read('SETMENU.LZS')))
+    if ''.join('c' if it[0] == 'cmap' else 'p' for it in items) != 'cpc' + 'p' * 10:
+        raise SystemExit("SETMENU.LZS: unexpected chunk sequence")
+    cmap(items[0][1], 0xC8)
+    pict(items[1][1:], 0xC8)
+    cmap(items[2][1], 0xFA)
+    for it in items[3:]:
+        pict(it[1:], 0xFA)
+
+    # HELPMENU.LZS: (map @$C8, page @$C8) x 3; fn_4e12 shows two at most
+    items = list(sd.walk_gfx(src.read('HELPMENU.LZS')))
+    if ''.join('c' if it[0] == 'cmap' else 'p' for it in items)[:4] != 'cpcp':
+        raise SystemExit("HELPMENU.LZS: unexpected chunk sequence")
+    for k in range(2):
+        cmap(items[2 * k][1], 0xC8)
+        pict(items[2 * k + 1][1:], 0xC8)
+
+    # GOMENU.LZS: map @0, the map picture @0, map @$F0, the tick @$F0 (fn_5164)
+    items = list(sd.walk_gfx(src.read('GOMENU.LZS')))
+    if ''.join('c' if it[0] == 'cmap' else 'p' for it in items) != 'cpcp':
+        raise SystemExit("GOMENU.LZS: unexpected chunk sequence")
+    cmap(items[0][1], 0)
+    pict(items[1][1:], 0)
+    cmap(items[2][1], 0xF0)
+    pict(items[3][1:], 0xF0)
+
+    # ANIM.LZS (fn_4575 0x4629): "ANIM", u16 n_frames, CMAP @0, then per
+    # frame u16 n_picts and the pictures (@0, blitted opaque)
+    data = src.read('ANIM.LZS')
+    s = Stream(data, 0)
+    if s.read_bytes(4) != b'ANIM':
+        raise SystemExit("ANIM.LZS: no ANIM tag")
+    n_frames = s.read_u16()
+    if s.read_bytes(4) != b'CMAP':
+        raise SystemExit("ANIM.LZS: no colour map")
+    count = s.read_byte()
+    rgb = s.read_bytes(3 * count)
+    s.read_bytes(2 * count)
+    cmap([tuple(rgb[i * 3:i * 3 + 3]) for i in range(count)], 0)
+    for f in range(n_frames):
+        for _ in range(s.read_u16()):
+            if s.read_bytes(4) != b'PICT':
+                raise SystemExit("ANIM.LZS: a frame's record is not a PICT")
+            ofs, h, w = s.read_u16(), s.read_u16(), s.read_u16()
+            anim.append((f, len(pics)))
+            pict((ofs, w, h, decompress(s, w * h)), 0)
+    if len(anim) > 300:                          # the EXE's table (0x46A0)
+        raise SystemExit(f"ANIM.LZS: {len(anim)} records, the original holds 300")
+
+    for ofs, w, h, _ in pics:
+        if ofs % 320 + w > 320 or ofs // 320 + h > 200:
+            raise SystemExit(f"a picture {w}x{h} at {ofs} leaves the screen")
+
+    head = 16 + 12 * len(pics) + 8 * len(cmaps) + 4 * len(anim)
+    head = (head + 7) // 8 * 8
+    table = bytearray(struct.pack('>IIII', FRONT_MAGIC, len(pics), len(cmaps), len(anim)))
+    data = bytearray()
+    for ofs, w, h, px in pics:
+        table += struct.pack('>HHHHI', ofs, w, h, 0, head + len(data))
+        data += pad8(px)
+    rgb_at = []
+    for base, c in cmaps:
+        rgb_at.append(head + len(data))
+        data += bytes(v for t in c for v in t)
+        data += bytes(-len(data) % 2)
+    for (base, c), at in zip(cmaps, rgb_at):
+        table += struct.pack('>HHI', base, len(c), at)
+    for f, p in anim:
+        table += struct.pack('>HH', f, p)
+    table += bytes(head - len(table))
+    return bytes(table + data), pics, cmaps
+
+
+def front_previews(pics, cmaps):
+    """A few screens as the original composes them, to look at."""
+    def screen(cm, pp):
+        pal = [(0, 0, 0)] * 256
+        for k in cm:
+            base, c = cmaps[k]
+            for i, v in enumerate(c):
+                pal[base + i] = v
+        fb = bytearray(320 * 200)
+        for k, opaque in pp:
+            ofs, w, h, px = pics[k]
+            for y in range(h):
+                for x in range(w):
+                    p = px[y * w + x]
+                    if p or opaque:
+                        fb[ofs + y * 320 + x] = p
+        return bytes(fb), [rgb16(c) for c in pal]
+    # title + logo with the menu's palette (A, B, C); the road map; settings;
+    # the first help page
+    for name, cm, pp in (('title.png', (0, 1, 2), ((0, True), (1, False))),
+                         ('gomenu.png', (22, 23), ((25, True), (26, False))),
+                         ('setmenu.png', (18, 19), ((12, True), (13, False), (18, False))),
+                         ('help0.png', (20,), ((23, True),))):
+        fb, clut = screen(cm, pp)
+        png(name, 320, 200, fb, clut)
+
+
 def find_source(argv):
     if len(argv) > 1:
         return argv[1]
@@ -316,7 +484,10 @@ def main(argv):
             raise SystemExit(f"WORLD{w}: unexpected picture {pw}x{ph}@{ofs}")
         worlds.append((pal, sd.rebase(px, sd.BASE_WORLD)))
 
-    # --- CLUTs: one per road -----------------------------------------------
+    # --- palettes: one per road, as the VGA DAC holds them (6 bits a gun) ---
+    # The 68000 fades them with the original's formula (fn_4315) and turns
+    # them into Jaguar RGB16 on the way to the CLUT (csrc/front.c).
+    pals6 = []
     cluts = []
     for e, road in enumerate(roads):
         pal = [(0, 0, 0)] * 256
@@ -330,7 +501,12 @@ def main(argv):
             if sd.BASE_WORLD + i < 256:
                 pal[sd.BASE_WORLD + i] = c
         cluts.append([rgb16(c) for c in pal])
-    write('game_clut.bin', b''.join(struct.pack('>256H', *c) for c in cluts))
+        pals6.append(bytes(v for c in pal for v in c))
+    write('game_pal.bin', b''.join(pals6))
+
+    # --- the intro and the menus --------------------------------------------
+    front, front_pics, front_cmaps = front_blob(src)
+    write('front.bin', front)
 
     # --- backdrops ----------------------------------------------------------
     write('worlds.bin', b''.join(pad8(px) for _, px in worlds))
@@ -404,6 +580,7 @@ def main(argv):
             elif DASH_Y + y >= WORLD_H:
                 frame[(DASH_Y + y) * 320 + x] = 0
     png('m0_expected.png', 320, 200, bytes(frame), clut)
+    front_previews(front_pics, front_cmaps)
     print(f"sr2jag: previews in {os.path.relpath(PREVIEW, REPO)}")
 
 

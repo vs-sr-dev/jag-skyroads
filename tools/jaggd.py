@@ -1,7 +1,10 @@
 """The Jaguar GameDrive over its side USB port: a ROM onto the real Jaguar without the SD card.
 
     python tools/jaggd.py reboot [menu|debug|rom]
-    python tools/jaggd.py run ROM.j64           upload to $800000 and boot it from the BIOS
+    python tools/jaggd.py run ROM.j64 [--eeprom NAME[,SIZE] | --no-eeprom]
+                                                upload to $800000 and boot it from the BIOS,
+                                                with the cartridge EEPROM backed by NAME on the
+                                                SD card (default: the ROM's name, .e2p, 128 bytes)
     python tools/jaggd.py upload FILE --base A [--exec X]   (from the debug stub)
     python tools/jaggd.py listen [--port COMn] [--secs N]
 
@@ -90,8 +93,16 @@ def close_gd(dev):
     dev.prowl_drain.stop()
 
 
-def command(dev, payload):
-    n = dev.ctrl_transfer(0x41, 1, 0, 0, bytes(payload), 2000)   # VENDOR | INTERFACE, OUT
+def command(dev, payload, tries=3):
+    import usb.core
+    for k in range(tries):
+        try:
+            n = dev.ctrl_transfer(0x41, 1, 0, 0, bytes(payload), 2000)   # VENDOR | INTERFACE, OUT
+            break
+        except usb.core.USBError:   # a pipe error while the micro is busy: wait, ask again
+            if k == tries - 1:
+                raise
+            time.sleep(1.0)
     if n != len(payload):
         sys.exit(f'GameDrive took {n} of {len(payload)} command bytes')
 
@@ -99,6 +110,28 @@ def command(dev, payload):
 def reboot(dev, target):
     command(dev, [0x02, REBOOT[target]])
     time.sleep(1.5)                                     # jaggd.exe waits this long
+
+
+EEPROM_TYPE = {128: 0, 256: 1, 512: 1, 1024: 2, 2048: 2}
+
+
+def eeprom(dev, name, size=128):
+    """open_jaggd's -e (cubanismo/open_jaggd, jaggd.c): the EEPROM a USB-loaded ROM sees is
+    backed by `name` on the memory card.  Without it there is no EEPROM to keep: retail games
+    from the SD card get one (the GD's red LED flashes on a save), ours from USB did not
+    (JagSkyroads session 5: settings and completed roads lost at power-off).  After the
+    reboot into the stub, before the upload.
+        0x39 0x02  u32 0 | 0x33 0x06  type (0 128 B, 1 256/512, 2 1K/2K)  name[48] NUL-ended"""
+    if size not in EEPROM_TYPE:
+        sys.exit(f'EEPROM size {size}: 128, 256, 512, 1024 or 2048')
+    raw = name.encode('latin-1')
+    if len(raw) > 47:
+        sys.exit(f'EEPROM file name longer than 47 bytes: {name}')
+    pkt = bytes([0x39, 0x02, 0, 0, 0, 0, 0x33, 0x06, EEPROM_TYPE[size]]) + raw
+    pkt += bytes(0x39 - len(pkt))
+    command(dev, pkt)
+    time.sleep(1.5)             # the micro opens (or creates) the file: it refuses commands meanwhile
+    print(f'EEPROM: {name} on the memory card, {size} bytes')
 
 
 def upload(dev, data, base, exec_addr):
@@ -156,14 +189,20 @@ def lines(secs, port=None):
                     yield time.time() - t0, ln
 
 
-def run_rom(path):
-    """A cartridge ROM onto the Jaguar and booted (the GameDrive's debug stub first)."""
+def run_rom(path, ee='default'):
+    """A cartridge ROM onto the Jaguar and booted (the GameDrive's debug stub first).
+    ee: 'default' = <rom name>.e2p, 128 bytes; None = no EEPROM; else 'NAME[,SIZE]'."""
     data = open(path, 'rb').read()
     if rom_entry(data) is None:
         sys.exit(f'{path}: no cartridge header at $400')
+    if ee == 'default':
+        ee = os.path.splitext(os.path.basename(path))[0] + '.e2p'
     dev = open_gd()
     try:
         reboot(dev, 'debug')                            # uploads are taken from the stub
+        if ee:
+            name, _, size = ee.partition(',')
+            eeprom(dev, name, number(size) if size else 128)
         print(f'{os.path.basename(path)} -> $800000, boot from the BIOS')
         upload(dev, data, 0x800000, 0xFFFFFFFF)
     finally:
@@ -193,6 +232,8 @@ def main(argv=None):
     p.add_argument('target', nargs='?', default='menu', choices=REBOOT)
     p = sub.add_parser('run')
     p.add_argument('rom')
+    p.add_argument('--eeprom', default='default', help='NAME[,SIZE] on the memory card')
+    p.add_argument('--no-eeprom', action='store_const', const=None, dest='eeprom')
     p = sub.add_parser('upload')
     p.add_argument('file')
     p.add_argument('--base', type=number, required=True)
@@ -206,7 +247,7 @@ def main(argv=None):
     if a.cmd == 'listen':
         return listen(a.port, a.baud, a.secs)
     if a.cmd == 'run':
-        return run_rom(a.rom)
+        return run_rom(a.rom, a.eeprom)
     dev = open_gd()
     try:
         if a.cmd == 'reboot':

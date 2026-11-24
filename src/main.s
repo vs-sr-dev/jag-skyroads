@@ -225,6 +225,9 @@ Start:
 
 ; Palette, world and dashboard are the C side's, per road (road_start in
 ; csrc/game_main.c): here only what never changes.
+    move.l  #ReadPad, PAD_FN                ; for the front end's waits
+    move.l  #EeReadC, EE_READ_FN            ; skyroads.cfg (c_init reads it)
+    move.l  #EeWriteC, EE_WRITE_FN
     bsr     LoadCars
     bsr     LoadTrek
     bsr     InitGpu
@@ -305,9 +308,13 @@ MainLoop:
     move.l  d0, GAME_DONE
 .ml_tick:
     moveq   #0, d7                          ; ticks run this frame
+; The front end (csrc/front.c) runs INSIDE a tick and consumes the ticks it
+; waits through itself (GAME_DONE + 1 each): GAME_DONE may come back past the
+; d6 read above, so the test is "still behind", never "equal".
 .ml_more:
-    cmp.l   GAME_DONE, d6
-    beq.s   .ml_render
+    move.l  d6, d0
+    sub.l   GAME_DONE, d0
+    ble.s   .ml_render
     jsr     C_ENTRY_TICK
     addq.l  #1, GAME_DONE
     addq.l  #1, d7
@@ -878,6 +885,7 @@ LoadTrek:
     rts
 
     .include "src/gd.s"
+    .include "src/eeprom.s"
 
 ; The GPU's code: its own section and .org, so it goes LAST.
     .include "src/gpu_road.s"

@@ -257,11 +257,32 @@ redrawn from scratch into all three buffers); the ~120 half-lines of input
     InitDspAudio) because **a movei of a 68000 label inside DSP code is
     relocated WRONGLY by RMAC** (DCODE lands in the wrong half: main.bin).
   - Open: effect 3 (fuel/oxygen warning, 0x13ed/0x14d6) is not in play.c,
-    so it does not play yet; songs 0 (intro) and 1 (menus) are M5's, the
-    demo uses 1 meanwhile; effect 2's 50 kHz (TC $EC) is the port's
+    so it does not play yet (songs 0 and 1: intro and menus, M5); effect
+    2's 50 kHz (TC $EC) is the port's
     reading, unverified; a higher rate needs a cheaper channel loop.
-- **M5 — the rest of the game.** Intro animation, menus, road selection,
-  settings, completed roads saved to the cartridge EEPROM.
+- **M5 — DONE on hardware (session 5).** The front end transcribed from the
+  EXE's disassembly, NOT from skyroads-port's game.c (which approximates it:
+  no logo wipe, no captions, an invented idle timeout, a brightened road
+  name, a "wait for a key" after a completed road).  `csrc/front.c`: a VGA
+  model on the 68000 (the DAC published to the CLUT through FADE_PAL, fn_4315
+  fades with its exact integer formula, fn_4184's threshold blitter, BIOS
+  getkey with typematic repeat on the D-pad), blocking inside c_tick as the
+  original blocks, consuming ticks itself (fe_tick; main.s's loop accepts a
+  GAME_DONE that moved).  The flow is main 0x1b8: intro (fn_4575: title,
+  INTRO.SND, ANIM at 18 fps, the logo revealed by alternate rows, a white
+  flash, five captions) -> run to its end = the attract demo, then the intro
+  again; a key -> main menu (fn_4e36) -> road map (fn_5164) -> road.
+  play_road (fn_2b21): fade-in with the game FROZEN, "Road Completed" / "The
+  End" for 27 ticks, fade-out; completed -> road map on the next road; ESC
+  -> road map; lost -> the same road.  Settings (fn_4c04) and help
+  (fn_4e12: two pages of three) as the EXE; sound off stops music and
+  effects (not INTRO.SND, as 0x4775).  Pad: D-pad = arrows, A/B = ENTER,
+  C/OPTION = ESC; in the demo only ESC (0x21e9).  skyroads.cfg in the
+  cartridge EEPROM (`src/eeprom.s`, Atari's EEPRIM.S as it is): verified on
+  hardware across a power-off.  `tools/sr2jag.py front_blob`: the screens'
+  pictures rebased as the loader does; game palettes now 6-bit (game_pal.bin).
+  Cartridge: 4 MB.  Text: our own 8x8 glyphs (the original uses the VGA
+  BIOS's font, which is not SkyRoads' data).
 - **M6 — distribution.** BYOA package (`make_rom.py` + prebuilt engine),
   optional aspect correction (OP scaled objects: mode 13h pixels are 1.2:1).
 
@@ -326,5 +347,20 @@ constants inside `play.c` stay where the reimplementation put them.
 - A `stop` that waits for an interrupt must never run with the interrupts
   off: frame 1 is drawn by c_init before INT1 is enabled, and an unsigned
   `k - 2` sent it to sleep for ever (green COL_BOOT screen, session 3).
+- **m68k-elf-gcc 15.2 miscompiled a long-copy loop** into
+  `move.l (a2)+,(0,a2,d0.l)` (d0 = dst - src): the 68000 increments a2
+  before it forms the destination, every long landed 4 bytes late (session
+  5: the road map's text 4 px right of its frame, the menu's background off
+  by 4 inside the box; every offline render was perfect, the user's photos
+  showed it).  Copies go through inline asm; build_engine.sh fails if the
+  pattern reappears in engine.lst.
+- The EXE's cfg checksum (fn_56c3) advances its pointer once, before the
+  loop: it sums (control XOR i) 32 times and guards nothing else.  Ours sums
+  what it meant to.
+- **The GameDrive keeps a USB-loaded ROM's EEPROM only if told the file**
+  (open_jaggd's `-e`, `tools/jaggd.py eeprom`, sent by `run` as
+  `<rom>.e2p`): without it the EEPROM answers in the session and nothing
+  reaches the SD card.  Right after that command the micro refuses commands
+  and can wedge until a power-off: 1.5 s pause.  No red LED for USB saves.
 - BigPEmu's frame-event script did not run here (no frame ever reached); the
   hardware, with the BG-register stage colours, was the faster instrument.

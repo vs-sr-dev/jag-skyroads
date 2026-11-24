@@ -20,7 +20,7 @@ OUT=../build
 CFLAGS="${EXTRA_CFLAGS} -m68000 -O2 -std=c11 -fomit-frame-pointer -ffreestanding -fno-builtin \
         -fno-tree-loop-distribute-patterns --param=min-pagesize=0 -Wall -Wextra -I."
 
-SRC="port/play.c road.c hud.c libc.c game_main.c"
+SRC="port/play.c road.c hud.c libc.c front.c game_main.c"
 OBJS="crt0.o"
 
 "$BIN/m68k-elf-as" -m68000 crt0.s -o crt0.o
@@ -36,6 +36,15 @@ mkdir -p "$OUT"
 "$BIN/m68k-elf-nm" -n "$OUT/engine.elf" > "$OUT/engine.sym"
 "$BIN/m68k-elf-objdump" -d "$OUT/engine.elf" > "$OUT/engine.lst"
 rm -f *.o
+
+# m68k-elf-gcc 15.2 once made "move.l (a2)+,(0,a2,d0.l)" of a copy loop: the
+# 68000 increments a2 before it forms the destination, every long landed 4
+# bytes late (session 5, hardware).  The pattern must never come back.
+if grep -qE '(%a[0-7])@\+,\1@\(' "$OUT/engine.lst"; then
+    echo "ERROR: same-register (An)+ source and (d,An,Xn) destination in engine.lst:"
+    grep -nE '(%a[0-7])@\+,\1@\(' "$OUT/engine.lst"
+    exit 1
+fi
 
 # The entry table MUST be the blob's first bytes: RMAC jumps to fixed offsets.
 FIRST=$("$BIN/m68k-elf-nm" -n "$OUT/engine.elf" | grep -m1 ' [Tt] ' | awk '{print $3}')

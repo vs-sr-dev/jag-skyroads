@@ -3,16 +3,25 @@
  * c_tick runs once per 36.0036 Hz game tick (RMAC counts them in the video
  * interrupt), c_render once per video frame that had ticks.
  *
+ * THE FLOW is SKYROADS.EXE's main (0x1b8), not skyroads-port's game.c:
+ *   intro (csrc/front.c) -> if it ran to the end, the attract demo, then the
+ *   intro again; a key during it -> the main menu -> the road map -> a road.
+ *   A road (play_road, fn_2b21): its first frame, a fade-in with the game
+ *   FROZEN, the game; at the end "Road Completed" (or "The End") for 27
+ *   ticks, a fade-out.  Then: completed -> the road map, the next road
+ *   selected; ESC (OPTION) -> the road map; lost -> the same road at once.
+ *   The demo: ESC -> main menu, its end -> the intro.  The front end BLOCKS
+ *   inside c_tick (it waits ticks itself, front.c fe_tick), as the original
+ *   blocks in its menus.
+ *
  * ATTRACT: DEMO.REC drives road 0 through skyroads-port's play.c, and every
  *   tick is compared with the PC oracle's record (csrc/shared.h, ROM_DEMOX);
  *   the first tick that differs goes to DEMO_BAD, which RMAC shows in the
- *   margins.  A game button starts road 1.
- * PLAY: the pad drives play.c.  A completed road goes on to the next, a lost
- *   one starts again (the original replays it at once: game.c, main 0x3b4).
- *   PAUSE pauses, OPTION goes back to the demo.  On the KEYPAD, never on the
- *   game controls: * and # step to the previous / next road (a test
- *   instrument until the road menu exists), 0 shows the frame's timings,
- *   9 checks the GPU's composers against road_compose (below).
+ *   margins.
+ * PLAY: the pad drives play.c (A/B/C jump, PAUSE pauses, OPTION is ESC).  On
+ *   the KEYPAD, never on the game controls: * and # step to the previous /
+ *   next road (a test instrument), 0 shows the frame's timings, 9 checks the
+ *   GPU's composers against road_compose (below).
  *
  * SOUND (M4): the songs and the effects are Jerry's (src/dsp_audio.s, an
  *   OPL2 synthesised on the DSP); this side only says which, through the
@@ -26,6 +35,7 @@
 #include "road.h"
 #include "hud.h"
 #include "mem_map.h"
+#include "front.h"
 
 #define HW16(a) (*(volatile int16_t *)(uintptr_t)(a))
 #define HW32(a) (*(volatile uint32_t *)(uintptr_t)(a))
@@ -99,12 +109,7 @@ static int gpu_run(uint32_t entry_pc)
     return 0;
 }
 
-/* Ticks a finished road holds its last frame: the demo before it starts
- * again, a lost road before the retry, a completed one before the next. */
-#define HOLD_DONE     72
-
 #define PADB(n)       (1u << (n))
-#define PAD_GAME_BTNS (PADB(PAD_B_A) | PADB(PAD_B_B) | PADB(PAD_B_C) | PADB(PAD_B_PAUSE))
 #define PAD_JUMP      (PADB(PAD_B_A) | PADB(PAD_B_B) | PADB(PAD_B_C))
 
 void c_render(void);
@@ -127,16 +132,40 @@ void c_render(void);
  * (music_start 0x57b1). */
 static int song_now = -1, song_want = -1, game_song = -1, sfx_want = -1;
 static uint32_t aud_vi, rnd;
+#define SONG_SILENCE 14                 /* muzax.bin's stream 15 */
 
-static void music(int n)
+/* music_start 0x57a8: the song already playing goes on; otherwise the
+ * music stops, and starts again only if the sound is on (ds:0x4528). */
+void music(int n)
 {
-    if (n != song_now) {
-        song_now = n;
-        song_want = n;
-    }
+    if (n == song_now)
+        return;
+    song_now = -1;
+    song_want = SONG_SILENCE;
+    if (cfg.sound_off)
+        return;
+    song_now = n;
+    song_want = n;
 }
 
-static void audio_post(void)
+void music_stop(void)
+{
+    song_now = -1;
+    song_want = SONG_SILENCE;
+}
+
+void sfx(int n)                         /* play_sfx 0x3c2: gated by sound off */
+{
+    if (!cfg.sound_off)
+        sfx_want = n;
+}
+
+void sfx_voice(void)                    /* INTRO.SND, 0x4775: not gated */
+{
+    sfx_want = 5;
+}
+
+void audio_post(void)
 {
     uint32_t vi = HW32(IRQ_TICK);
     if (vi == aud_vi)
@@ -223,9 +252,7 @@ static uint16_t grid[SR_GRID_ROWS * 7];
 static sr_road road;
 static sr_play play;
 static int result;
-static uint32_t hold;
 static int demo;              /* 1: attract demo */
-static int entry;             /* the road being played, 1..30 */
 static int paused;
 static uint16_t pad_prev, keys_prev;
 /* THREE frame buffers: the one on screen, the one the next video interrupt
@@ -238,50 +265,20 @@ static const uint32_t views[N_VIEWS] = { VIEW0, VIEW1, VIEW2 };
 static int view_next;          /* the buffer the next frame goes into */
 static hud_state hud_st[N_VIEWS];   /* what each frame buffer's dashboard shows */
 
-/* ---- FADES: the original's transitions (fn_4b72, skyroads-port game.c
- * fade_to) ------------------------------------------------------------------
- * 36 ticks to black with the game frozen and nothing drawn, the switch (the
- * road built while the screen is black: road_start, one frame, the dashboard
- * copied into the other buffers), 36 ticks back with the game running, as
- * the port does.  The CLUT goes in the blanking: fade_publish fills
- * FADE_PAL and bumps FADE_SEQ, the video interrupt copies it. */
-enum { FADE_NONE, FADE_OUT, FADE_IN };
-static int fade = FADE_NONE, fade_t;
-static int fade_e, fade_demo;   /* the road the fade-out leads to */
+/* ---- THE FLOW (main 0x1b8, play_road fn_2b21) ------------------------- */
+enum { AT_INTRO, AT_MENU, AT_GOMENU, AT_REPLAY, AT_STEP };
+static int live;                /* a road is running: ticks and frames go to it */
+static int at = AT_INTRO;       /* where the director goes next */
+static int menu_first;          /* main's -8(bp): the menu follows the intro */
+static int last_road;           /* "The End" if this one completes (0x339) */
 static int hud_prime;           /* the next frame primes all dashboards */
-static uint16_t pal_full[256];  /* the road's palette at full light */
-
-/* fn_4b72/fn_4315: linear DAC scale, pct = 100 * t / 36, each channel
- * scaled as c * pct / 100 - one table of 64 per step, no division a pixel. */
-static void fade_publish(int t)
-{
-    uint8_t lut[64];
-    int pct = t * 100 / 36;
-    for (int c = 0; c < 64; c++)
-        lut[c] = (uint8_t)(c * pct / 100);
-    uint16_t *out = (uint16_t *)(uintptr_t)FADE_PAL;
-    for (int i = 0; i < 256; i++) {
-        uint16_t v = pal_full[i];
-        out[i] = (uint16_t)(lut[v >> 11] << 11 | lut[(v >> 6) & 31] << 6 | lut[v & 63]);
-    }
-    HW32(FADE_SEQ) = HW32(FADE_SEQ) + 1;
-}
-
-static void fade_to(int e, int is_demo)
-{
-    if (fade == FADE_OUT)
-        return;
-    if (fade == FADE_NONE)
-        fade_t = 36;                    /* (from a fade-in: from where it is) */
-    fade = FADE_OUT;
-    fade_e = e;
-    fade_demo = is_demo;
-}
+static const uint8_t *game_pal; /* the road's palette, 6-bit (ds:0x41d0) */
+#define R_STEP 100              /* keypad * / #: another road, at once */
 
 /* A road from scratch: grid, pristine screen (its world + the dashboard),
  * palette.  The original loads all three at road start (game.c start_road,
  * render.c sr_render_set_world).  It runs at the bottom of a fade, the
- * screen black: the palette goes to pal_full, the fade-in shows it. */
+ * screen black: road_begin fades the palette in. */
 static void road_start(int e, int is_demo)
 {
     const uint8_t *demo_blob = (const uint8_t *)(uintptr_t)ROM_DEMO;
@@ -290,11 +287,11 @@ static void road_start(int e, int is_demo)
     hud_pristine((uint8_t *)(uintptr_t)PRISTINE,
                  (const uint8_t *)(uintptr_t)(ROM_WORLDS + (uint32_t)world * WORLD_STRIDE),
                  (const uint8_t *)(uintptr_t)ROM_DASH);
-    const uint16_t *clut = (const uint16_t *)(uintptr_t)(ROM_CLUT + (uint32_t)e * CLUT_BYTES);
+    game_pal = (const uint8_t *)(uintptr_t)(ROM_PAL + (uint32_t)e * PAL_BYTES);
     int lmax = -1, lmin = 1 << 30;
     for (int i = 0; i < 256; i++) {
-        pal_full[i] = clut[i];          /* the fade loads the CLUT (fade_publish) */
-        int l = 2 * (clut[i] >> 11) + 3 * ((clut[i] >> 6) & 31) / 2 + (clut[i] & 63);
+        const uint8_t *c = game_pal + 3 * i;
+        int l = 2 * c[0] + 3 * c[1] + c[2];
         if (l > lmax) { lmax = l; pf_fg = (uint8_t)i; }
         if (l < lmin) { lmin = l; pf_bg = (uint8_t)i; }
     }
@@ -302,22 +299,10 @@ static void road_start(int e, int is_demo)
         sr_play_init(&play, &road, DEMO_DATA(demo_blob), DEMO_LEN(demo_blob));
     else
         sr_play_init(&play, &road, NULL, 0);
-    if (is_demo) {
-        music(1);
-    } else if (demo || song_now < 2) {
-        /* a game begins: 2 + rand % 12, not the last one again (0x29f) */
-        rnd = rnd * 1103515245u + 12345u + HW32(IRQ_TICK);
-        int k = (int)((rnd >> 16) % 12u);
-        if (k == game_song)
-            k = (k + 1) % 12;
-        game_song = k;
-        music(2 + k);
-    }
     demo = is_demo;
     for (int i = 0; i < N_VIEWS; i++)
         hud_st[i].valid = 0;
     result = SR_RES_RUNNING;
-    hold = 0;
     paused = 0;
     HW16(GAME_MODE) = (int16_t)(is_demo ? 0 : 1);
     if (is_demo)
@@ -336,12 +321,13 @@ uint32_t c_init(void)
     HW32(DEMO_RUNS) = 0;
     road_gpu_quads((uint8_t *)(uintptr_t)COMP_IN, (const uint8_t *)(uintptr_t)ROM_TABLES);
     road_shadow_masks((uint8_t *)(uintptr_t)SHADOW_MASKS, (const uint8_t *)(uintptr_t)ROM_TABLES);
-    road_start(0, 1);
-    fade = FADE_IN;             /* from black, as the original's intro */
-    fade_t = 0;
-    fade_publish(0);
-    hud_prime = 1;
-    c_render();                 /* frame 1 ready before the OP list exists */
+    /* The interrupts are still off: nothing here may wait.  The front end
+     * starts at the first tick (director). */
+    if (!fe_init())
+        return 0;               /* front.bin is not this code's: Panic */
+    fe_cfg_load();              /* main 0x202 */
+    HW16(GAME_MODE) = 2;        /* black margins outside the demo */
+    music(0);                   /* main 0x207 */
     return C_MAGIC;
 }
 
@@ -357,7 +343,7 @@ static void demo_tick(void)
     sr_play_input(&play, &none);
     result = sr_play_tick(&play);
     if (play.pending_sfx) {             /* fn_03c2's calls */
-        sfx_want = play.pending_sfx - 1;
+        sfx(play.pending_sfx - 1);
         play.pending_sfx = 0;
     }
     ship_pose_t s = ship_pose(&play, play.tick, play.on_sticky);
@@ -384,8 +370,100 @@ static void demo_tick(void)
     }
 }
 
-static int next_road(int e) { return e >= 30 ? 1 : e + 1; }
-static int prev_road(int e) { return e <= 1 ? 30 : e - 1; }
+void c_render(void);
+
+/* A road (fn_2b21 up to the game loop): built while the screen is black,
+ * its first frame drawn and shown, then the fade-in - with the game
+ * FROZEN, as fn_4b72 blocks there (0x2c35) before fn_1f2c starts. */
+static void road_begin(int e, int is_demo)
+{
+    if (!is_demo) {                     /* 0x30e..0x361 */
+        int n = 0;
+        for (int i = 0; i < 30; i++)
+            n += cfg.done[i] != 0;
+        last_road = cfg.done[fe_road] == 0 && n == 29;
+    }
+    road_start(e, is_demo);
+    hud_prime = 1;
+    live = 1;
+    c_render();
+    fe_wait_shown();
+    fe_fade_full(game_pal, 1, 36);
+    fe_flush();
+    pad_prev = (uint16_t)HW16(PAD_STATE);
+    keys_prev = (uint16_t)HW16(PAD_KEYS);
+}
+
+/* The end of a road (fn_2b21 after the loop, then main 0x36a..0x3b7): the
+ * text over the last frame and 27 ticks if completed, the fade-out, and
+ * where to go next. */
+static void road_end(int r)
+{
+    fe_wait_shown();
+    if (r == SR_RES_COMPLETE) {
+        fe_text((uint8_t *)(uintptr_t)HW32(ROAD_VIEW), last_road ? 0x84 : 0x68, 0x50,
+                last_road ? "The End" : "Road Completed", 0x63);
+        fe_wait(27);
+    }
+    fe_fade_full(game_pal, 0, 36);
+    live = 0;
+    paused = 0;
+    if (demo) {
+        at = r == SR_RES_QUIT ? AT_MENU : AT_INTRO;
+    } else if (r == R_STEP) {
+        at = AT_STEP;
+    } else if (r == SR_RES_COMPLETE) {
+        cfg.done[fe_road]++;
+        fe_road++;
+        fe_cfg_save();
+        at = AT_GOMENU;
+    } else if (r == SR_RES_QUIT) {
+        at = AT_GOMENU;
+    } else {
+        at = AT_REPLAY;
+    }
+}
+
+/* main's loop between roads: blocks in the front end until a road is
+ * chosen, then starts it. */
+static void director(void)
+{
+    if (at <= AT_GOMENU) {
+        HW16(GAME_MODE) = 2;
+        fe_show();
+    }
+    for (;;) {
+        if (at == AT_INTRO) {           /* 0x219 */
+            menu_first = 1;
+            if (!fe_intro()) {          /* ran to the end: the demo (0x229) */
+                menu_first = 0;
+                road_begin(0, 1);
+                return;
+            }
+            at = AT_MENU;
+        }
+        if (at == AT_MENU) {            /* 0x232 */
+            fe_mainmenu(!menu_first);
+            menu_first = 0;
+            at = AT_GOMENU;
+        }
+        if (at == AT_GOMENU) {          /* 0x282 */
+            if (fe_gomenu()) {
+                at = AT_MENU;
+                continue;
+            }
+            /* a song for the road: 2 + rand % 12, not the last one (0x29c) */
+            rnd = rnd * 1103515245u + 12345u + HW32(IRQ_TICK);
+            int k = (int)((rnd >> 16) % 12u);
+            if (k == game_song)
+                k = (k + 1) % 12;
+            game_song = k;
+            music(2 + k);
+        }
+        break;
+    }
+    road_begin(fe_road + 1, 0);         /* AT_GOMENU, AT_REPLAY, AT_STEP */
+}
 
 static void c_tick_inner(void);
 
@@ -410,72 +488,46 @@ void c_tick(void)
 
 static void c_tick_inner(void)
 {
+    if (!live) {
+        director();
+        return;
+    }
     uint16_t pad = (uint16_t)HW16(PAD_STATE), keys = (uint16_t)HW16(PAD_KEYS);
     uint16_t edge = pad & (uint16_t)~pad_prev, kedge = keys & (uint16_t)~keys_prev;
     pad_prev = pad;
     keys_prev = keys;
 
-    /* the fade to black: everything frozen, nothing drawn (c_render); at
-     * the bottom the switch, then the fade-in with the game running */
-    if (fade == FADE_OUT) {
-        if (--fade_t <= 0) {
-            fade_t = 0;
-            road_start(fade_e, fade_demo);
-            fade = FADE_IN;
-            hud_prime = 1;
-        }
-        fade_publish(fade_t);
-        return;
-    }
-    if (fade == FADE_IN) {
-        if (++fade_t >= 36)
-            fade = FADE_NONE;
-        fade_publish(fade_t);
-    }
-
+    /* the demo: ESC only (0x21e9; its input is DEMO.REC's) */
     if (demo) {
-        if (edge & PAD_GAME_BTNS) {
-            entry = 1;
-            fade_to(entry, 0);
-            return;
-        }
-        if (result != SR_RES_RUNNING) {
-            fade_to(0, 1);              /* the original fades to its menu */
+        if (edge & PADB(PAD_B_OPT)) {
+            road_end(SR_RES_QUIT);
             return;
         }
         demo_tick();
+        if (result != SR_RES_RUNNING)
+            road_end(result);
         return;
     }
 
-    if (edge & PADB(PAD_B_OPT)) {
-        fade_to(0, 1);
+    if (kedge & (PADB(KEY_B_STAR) | PADB(KEY_B_HASH))) {
+        fe_road = (fe_road + ((kedge & PADB(KEY_B_STAR)) ? 29 : 1)) % 30;
+        road_end(R_STEP);
         return;
     }
-    if (kedge & PADB(KEY_B_STAR)) {
-        entry = prev_road(entry);
-        fade_to(entry, 0);
+    /* P pauses; while paused ESC quits, any other key goes on (0x2050) */
+    if (paused) {
+        if (edge & PADB(PAD_B_OPT))
+            road_end(SR_RES_QUIT);
+        else if (edge)
+            paused = 0;
         return;
     }
-    if (kedge & PADB(KEY_B_HASH)) {
-        entry = next_road(entry);
-        fade_to(entry, 0);
+    if (edge & PADB(PAD_B_PAUSE)) {
+        paused = 1;
         return;
     }
-    if (edge & PADB(PAD_B_PAUSE))
-        paused = !paused;
-    if (paused)
-        return;
-
-    /* deaths: the same road again, through a fade, at once (main 0x3b4);
-     * completed: held (the "Road Completed" text and the road menu come
-     * with M5), then the next road */
-    if (result != SR_RES_RUNNING) {
-        if (result != SR_RES_COMPLETE)
-            fade_to(entry, 0);
-        else if (++hold >= HOLD_DONE) {
-            entry = next_road(entry);
-            fade_to(entry, 0);
-        }
+    if (edge & PADB(PAD_B_OPT)) {       /* ESC: result 7 (0x21fa) */
+        road_end(SR_RES_QUIT);
         return;
     }
 
@@ -490,9 +542,11 @@ static void c_tick_inner(void)
     sr_play_input(&play, &in);
     result = sr_play_tick(&play);
     if (play.pending_sfx) {
-        sfx_want = play.pending_sfx - 1;
+        sfx(play.pending_sfx - 1);
         play.pending_sfx = 0;
     }
+    if (result != SR_RES_RUNNING)
+        road_end(result);
 }
 
 /* ---- the Blitter: the pristine viewport into a frame buffer ------------
@@ -706,8 +760,8 @@ static void lg_frame(void)
 
 void c_render(void)
 {
-    if (fade == FADE_OUT)
-        return;                         /* frozen while fading to black */
+    if (!live)
+        return;                         /* between roads: the front end's */
     uint32_t k = HW32(ROAD_SEQ) + 1;
     _Static_assert(N_VIEWS == 3, "wait_shown assumes three frame buffers");
     /* Frames 1 and 2 have buffers no frame used before; frame 1 is drawn

@@ -16,7 +16,15 @@ build.bat path\to\skyroads.zip
 ```
 
 Output: `build\skyroads.j64`. With a GameDrive on USB:
-`python tools\jaggd.py run build\skyroads.j64`.
+`python tools\jaggd.py run build\skyroads.j64` (the cartridge EEPROM, where
+settings and completed roads are saved, is kept on the memory card as
+`skyroads.e2p`; from the memory card itself the GameDrive handles it alone).
+
+## Controls
+
+D-pad steers and throttles (arrows in the menus); A, B or C jump; A/B confirm
+in the menus, C or OPTION go back (ESC); OPTION in a road returns to the road
+map; PAUSE pauses.
 
 ## Credits
 

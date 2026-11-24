@@ -145,6 +145,13 @@ HAL_CELLS = [
     ('SND_IRQ', 4),              # DSP: I2S interrupts served
     ('SND_DONE', 4),             # DSP: samples produced
     ('SND_SPIN', 4),             # DSP: idle-loop turns with the ring full
+    # RMAC's ReadPad, for C to call while the front end waits (csrc/front.c):
+    # it saves what it uses (d0-d4).
+    ('PAD_FN', 4),
+    # The cartridge EEPROM (src/eeprom.s, Atari's primitives), for C:
+    # ee_read(word) and ee_write(word, data).
+    ('EE_READ_FN', 4),
+    ('EE_WRITE_FN', 4),
     ('GD_STATE', 2),             # GdInstall: 0 ok, else where it failed
     ('GD_PEND', 2),              # the micro's answer to the last line pending
 ]
@@ -214,12 +221,17 @@ def dram_regions():
         # because the DSP cannot name a 68000 label: RMAC relocates a movei
         # of one wrongly (DCODE lands in the wrong half; seen in main.bin).
         ('OPL_TABS', 640, 8),
+        # The front end's pictures that get drawn INTO (csrc/front.c): the
+        # title the main menu composes its logo into, the road map the ticks
+        # are drawn into.  The original reloads them from disk each time.
+        ('TITLE_BUF', GAME_BYTES, 64),
+        ('MENU_BG', GAME_BYTES, 64),
     ]
 
 
 # --- cartridge regions: (name, file) in order; sizes from cart/ ---------------
 CART_BLOBS = [
-    ('ROM_CLUT', 'game_clut.bin'),
+    ('ROM_PAL', 'game_pal.bin'),
     ('ROM_WORLDS', 'worlds.bin'),
     ('ROM_DASH', 'dash.bin'),
     ('ROM_CARS', 'cars.bin'),
@@ -231,6 +243,7 @@ CART_BLOBS = [
     ('ROM_DEMOX', 'demo_expect.bin'),   # tools/oracle/demo_oracle.c
     ('ROM_MUZAX', 'muzax.bin'),         # tools/muzax.py
     ('ROM_SFX', 'sfx.bin'),             # tools/sr2jag.py sfx_blob
+    ('ROM_FRONT', 'front.bin'),         # tools/sr2jag.py front_blob
 ]
 
 
@@ -374,7 +387,7 @@ def main():
            ('DASH_H', DASH_H, None), ('GAME_BYTES', GAME_BYTES, None), ('WORLD_BYTES', WORLD_BYTES, None),
            ('WORLD_STRIDE', align(WORLD_BYTES, 8), None), ('DASH_BYTES', DASH_BYTES, None),
            ('CAR_BYTES', CAR_BYTES, None), ('CAR_FRAMES', CAR_FRAMES, None),
-           ('CLUT_BYTES', 512, None), ('N_ROADS', 31, None), ('N_WORLDS', 10, None)]
+           ('PAL_BYTES', 768, None), ('N_ROADS', 31, None), ('N_WORLDS', 10, None)]
 
     os.makedirs(os.path.join(REPO, 'include'), exist_ok=True)
     os.makedirs(os.path.join(REPO, 'csrc'), exist_ok=True)
