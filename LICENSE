@@ -19,14 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
--------------------------------------------------------------------------------
-Parts that are not ours keep their own terms:
-
-- csrc/port/ (play.c, play.h, sr.h, assets.h) is skyroads-port's code, MIT
-  License, Copyright (c) 2026 Ammaar Reshi: csrc/port/LICENSE-skyroads-port.txt.
-  tools/lzs.py follows its decompressor (attribution in the file).
-- src/eeprom.s is Atari's EEPROM routines (Dave Staugas, Atari Corp., 1993),
-  distributed to Jaguar developers.
-- SkyRoads itself, and everything the build converts, is Bluemoon
-  Interactive's and is not in this repository.

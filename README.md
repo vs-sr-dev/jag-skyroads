@@ -72,5 +72,18 @@ map; PAUSE pauses.
 - The cartridge EEPROM routines are Atari's (Dave Staugas, 1993), as shipped
   to Jaguar developers.
 
-Our code is MIT-licensed ([LICENSE](LICENSE)); the parts above keep their own
-terms. Status and design: [docs/PLAN.md](docs/PLAN.md).
+## License
+
+Our code is MIT-licensed ([LICENSE](LICENSE)). The parts that are not ours
+keep their own terms:
+
+- `csrc/port/` (play.c, play.h, sr.h, assets.h) is skyroads-port's code, MIT
+  License, Copyright (c) 2026 Ammaar Reshi
+  ([its licence](csrc/port/LICENSE-skyroads-port.txt)); `tools/lzs.py`
+  follows its decompressor (attribution in the file).
+- `src/eeprom.s` is Atari's EEPROM routines (Dave Staugas, Atari Corp., 1993),
+  distributed to Jaguar developers.
+- SkyRoads itself, and everything the build converts, is Bluemoon
+  Interactive's and is not in this repository.
+
+Status and design: [docs/PLAN.md](docs/PLAN.md).
